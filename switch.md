@@ -6,7 +6,7 @@ This PowerShell script is designed to manage game versions for a specific game e
 - [switch.ps1](https://github.com/Bluscream/Scripts/raw/master/switch.ps1)
 - [switch.exe](https://github.com/Bluscream/Scripts/raw/master/switch.exe)
 
-Source is available[here](https://github.com/Bluscream/Scripts/blob/master/switch.ps1)
+Source is available [here](https://github.com/Bluscream/Scripts/blob/master/switch.ps1)
 
 ## Overview
 
