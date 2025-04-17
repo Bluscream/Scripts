@@ -9,12 +9,18 @@ function WriteHashesToFile {
         [string]$fileName = ".\hashes.md5"
     )
 
-    # Sort the file hashes by path for consistent output
-    $sortedHashes = $fileHashes.GetEnumerator() | 
-                    Sort-Object { $_.Value.Path } | 
-                    ForEach-Object {
-                        "$($_.Key)`t$($_.Value.Path)"
-                    }
+    # Create a sorted list of hash entries for the md5 file
+    $sortedHashes = @()
+
+
+    
+    foreach ($hash in $fileHashes.Keys) {
+        $files = $fileHashes[$hash]
+        # $sortedFiles = $files | Sort-Object -Property FullName
+        foreach ($file in $files) {
+            $sortedHashes += "$hash`t$($file.FullName)"
+        }
+    }
 
     # Write the sorted hashes to the specified file
     $sortedHashes | Out-File -FilePath $fileName -Encoding utf8 -Force
@@ -22,11 +28,71 @@ function WriteHashesToFile {
     Write-Host "Wrote $($sortedHashes.Count) file hashes to $fileName"
 }
 
+function ReplaceSymlinksWithCopies {
+    param(
+        [string]$Path = $PWD.Path
+    )
+
+    begin {
+        # Ensure we have an absolute path
+        if (-not [System.IO.Path]::IsPathRooted($Path)) {
+            $Path = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine((Get-Location).Path, $Path))
+        }
+        Write-Host "Scanning directory '$Path' for symlinks to replace with copies..."
+        $replacedCount = 0
+        $totalSize = 0
+    }
+
+    process {
+        Get-ChildItem -Path $Path -File -Recurse | ForEach-Object {
+            $currentFile = $_
+            $filePath = $currentFile.FullName
+
+            # Check if the file is a symlink
+            if (Test-Path -Path $filePath -PathType Leaf) {
+                $fileItem = Get-Item $filePath
+                $isSymlink = $fileItem.Attributes -match "ReparsePoint"
+                
+                if ($isSymlink) {
+                    Write-Host "Found symlink: '$filePath'"
+                    
+                    # Get the target of the symlink
+                    $targetPath = [System.IO.Path]::GetFullPath((Get-Item $filePath).Target)
+                    
+                    if (Test-Path -Path $targetPath -PathType Leaf) {
+                        # Create a backup of the symlink
+                        $backupPath = "$filePath.symlink_backup"
+                        Copy-Item -Path $filePath -Destination $backupPath -Force
+                        
+                        # Remove the symlink
+                        Remove-Item -Path $filePath -Force
+                        
+                        # Copy the target file to the original symlink location
+                        Copy-Item -Path $targetPath -Destination $filePath -Force
+                        
+                        $fileSize = (Get-Item $filePath).Length
+                        $totalSize += $fileSize
+                        $replacedCount++
+                        
+                        Write-Host "Replaced symlink with copy of target file: '$targetPath' -> '$filePath' ($('{0:N2}' -f ($fileSize / 1MB)) MB)"
+                    } else {
+                        Write-Warning "Target of symlink does not exist or is not a file: '$targetPath'"
+                    }
+                }
+            }
+        }
+    }
+
+    end {
+        Write-Host "Replaced $replacedCount symlinks with copies, total size: $('{0:N2}' -f ($totalSize / 1MB)) MB"
+    }
+}
+
 
 function ReplaceDuplicatesWithSymlinks {
     param(
         [string]$Path = $PWD.Path,
-        [string[]]$IgnoredExtensions = @(".symlink", ".lnk", ".url")
+        [string[]]$IgnoredExtensions = @(".symlink", ".lnk", ".url", ".md5")
     )
 
     begin {
@@ -164,5 +230,42 @@ function ReplaceDuplicatesWithSymlinks {
         Write-Host "Processed $totalFiles files. Final Size: $fileSizeStr"
     }
 }
+
+function DeduplicateAllLocalDrives {
+    [CmdletBinding()]
+    param()
+
+    process {
+        # Get all local fixed drives
+        $localDrives = Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 }
+        
+        if ($localDrives.Count -eq 0) {
+            Write-Host "No local drives found."
+            return
+        }
+        
+        Write-Host "Found $($localDrives.Count) local drives to deduplicate."
+        
+        # Process each drive
+        foreach ($drive in $localDrives) {
+            $drivePath = "$($drive.DeviceID)\"
+            Write-Host "Deduplicating $($drive.VolumeName) ($drivePath)"
+            
+            try {
+                # Call the main deduplication function for each drive
+                ReplaceDuplicatesWithSymlinks -Path $drivePath
+            }
+            catch {
+                Write-Error "Failed to deduplicate drive $drivePath`: $_"
+            }
+        }
+    }
+
+    end {
+        Write-Host "Completed deduplication of all local drives."
+    }
+}
+
+# DeduplicateAllLocalDrives
 
 ReplaceDuplicatesWithSymlinks -Path $Path
