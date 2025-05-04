@@ -268,4 +268,5 @@ function DeduplicateAllLocalDrives {
 
 # DeduplicateAllLocalDrives
 
-ReplaceDuplicatesWithSymlinks -Path $Path
+# ReplaceDuplicatesWithSymlinks -Path $Path
+ReplaceSymlinksWithCopies -Path $Path
