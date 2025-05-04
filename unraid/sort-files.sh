@@ -1,55 +1,54 @@
 #!/bin/bash
 
+# region UNRAID_PREP
+un-get update
+un-get upgrade
+# un-get install crc32
+# endregion UNRAID_PREP
+
 # Configuration
 SOURCE_DIR="_UNSORTIERT/"
-TARGET_BASE="organized/"
+DATE_COMMAND="exiftool -DateTimeOriginal -d %Y/%m/%d/%H%M%S%%le"
+FALLBACK_DATE="stat -c '%Y/%m/%d/%H%M%S'"
 
-# Create target base directory if it doesn't exist
-mkdir -p "$TARGET_BASE"
-
-# Process each file in the source directory
-find "$SOURCE_DIR" -type f | while read -r filepath; do
-    # Get relative path (remove SOURCE_DIR prefix)
-    rel_path="${filepath#$SOURCE_DIR}"
+# Process each file
+for filepath in "$SOURCE_DIR"*; do
+    # Skip directories
+    [ -f "$filepath" ] || continue
     
-    # Try to get EXIF date first
-    exif_date=$(exiftool -DateTimeOriginal -d "%Y/%m/%d" "$filepath" 2>/dev/null | awk '{print $3}')
+    # Get original path for metadata storage
+    orig_path=$(readlink -f "$filepath")
     
-    # Fallback to modification date if no EXIF date exists
-    if [ -z "$exif_date" ]; then
-        mod_time=$(stat -c "%Y" "$filepath")
-        date_str=$(date -d @"$mod_time" "+%Y/%m/%d")
-    else
-        date_str="$exif_date"
+    # Try to get date from metadata first
+    date_str=$($DATE_COMMAND "$filepath" 2>/dev/null)
+    
+    # Fallback to creation time if metadata date unavailable
+    if [ $? -ne 0 ]; then
+        date_str=$($FALLBACK_DATE "$filepath")
     fi
     
-    # Extract extension
+    # Extract year/month/day from date string
+    IFS="/" read -r year month day <<< "$date_str"
+    
+    # Create destination directory structure
+    dest_dir="./$year/$month/$day"
+    mkdir -p "$dest_dir"
+    
+    # Calculate CRC32 hash
+    crc32=$(md5sum "$filepath" | cut -d' ' -f1)
+    
+    # Get file extension
     ext="${filepath##*.}"
-    if [ "$ext" = "$filepath" ]; then
-        ext=""
-    else
-        ext=".$ext"
-    fi
     
-    # Generate CRC32 hash
-    crc32=$(crc32 "$filepath" | cut -d' ' -f1)
-    
-    # Construct target path
-    year_dir="${date_str%%/*}"
-    month_dir="${date_str#*/}"
-    day_dir="${date_str##*/}"
-    target_dir="$TARGET_BASE$year_dir/$month_dir/$day_dir"
-    target_filename="$crc32$ext"
-    target_path="$target_dir/$target_filename"
-    
-    # Create target directory structure
-    mkdir -p "$target_dir"
+    # Construct destination filename
+    dest_filename="$crc32.$ext"
+    dest_path="$dest_dir/$dest_filename"
     
     # Add original path to metadata
-    exiftool "-OriginalPath=$rel_path" "$filepath"
+    exiftool "-OriginalPath=$orig_path" "$filepath"
     
-    # Move file to new location
-    mv -i "$filepath" "$target_path"
+    # Move file to destination
+    mv "$filepath" "$dest_path"
     
-    echo "Moved: $filepath -> $target_path"
+    echo "Moved $filepath to $dest_path"
 done
