@@ -1,0 +1,28 @@
+#!/bin/bash
+# set -x # Set debug mode
+
+image=${1:-/mnt/disks/WSC2LFGJ/Backups/Timo/PC/Drives/c.img}
+mount=${2:-/mnt/disks/c}
+
+# Get partition information
+echo "=== Partition Information ==="
+fdisk -l "$image"
+
+# Get NTFS partition start sector (partition 3)
+start=$(fdisk -l "$image" | grep '^/'"$image"'3' | awk '{print $2}')
+
+echo "\nNTFS Partition Start Sector: $start"
+
+# Show sector size
+sectors=$(fdisk -l "$image" | grep '^Units:' | awk '{print $5}' | cut -d',' -f1)
+echo "Sector size: $sectors"
+
+# Calculate offset
+offset=$((start * sectors))
+echo "Calculated offset: $offset"
+
+mkdir $mount
+
+# Try mounting with verbose output
+# mount -v -r -o loop,offset=$offset "$image" $mount
+mount -r -t ntfs -o loop,offset=240123904 "$image" $mount

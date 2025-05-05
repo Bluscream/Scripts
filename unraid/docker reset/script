@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Temporary output file for the results of what custom network names were in use
+temporary_output_file="/mnt/user/system/custom_network_list.txt"
+
+# ONLY CHANGE THE OUTPUT LOCATION ABOVE IF WANTED THE FILE IS DELETED AUTOMATICALLY AT THE END OF THE SCRIPT
+
+# DO NOT CHANGE ANYTHING BELOW HERE!!!
+
+# Directory containing XML files
+input_dir="/boot/config/plugins/dockerMan/templates-user"
+
+# Clear the output file if it exists
+> "$temporary_output_file"
+
+# Loop through all XML files in the directory
+for file in "$input_dir"/*.xml; do
+  # Extract text content using grep and append to the output file
+  grep -oP '(?<=<Network>).*?(?=</Network>)' "$file" | grep -v "host" | grep -v "bridge" | grep -v "^br" | grep -v "container:"
+done | sort | uniq > "$temporary_output_file"
+
+# Display custom network names
+echo "Custom networks are as follows:"
+while IFS= read -r line
+do
+  echo "$line"
+done < "$temporary_output_file"
+
+# Removes the temporary output file
+rm "$temporary_output_file"

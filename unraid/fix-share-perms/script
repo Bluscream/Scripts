@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Enable extended globbing
+shopt -s extglob
+
+# Change to target directory and verify success
+echo "=== Starting directory permissions fixup ==="
+cd /mnt/user/ || { echo "ERROR: Could not change to /mnt/user/"; exit 1; }
+echo "Successfully entered /mnt/user/ directory"
+
+# Show excluded directories
+echo "\nExcluded directories:"
+echo "- appdata"
+echo "- system"
+
+# Display current permissions before changing
+echo "\nCurrent permissions before changes:"
+ls -la .
+
+# Apply chmod recursively with progress
+echo "\nApplying chmod 0777 to all folders..."
+chmod -Rv 0777 !(appdata|system)/
+echo "Chmod operation completed"
+
+# Verify new permissions
+echo "\nPermissions after chmod:"
+ls -la .
+
+# Apply chown recursively with progress
+echo "\nApplying ownership nobody:users..."
+chown -Rv nobody:users !(appdata|system)/
+echo "Chown operation completed"
+
+# Final verification
+echo "\nFinal permissions check:"
+ls -la .

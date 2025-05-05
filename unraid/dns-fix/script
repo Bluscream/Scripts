@@ -1,0 +1,4 @@
+#!/bin/bash
+sudo lsof -i :53
+killall dnsmasq
+sudo lsof -i :53
