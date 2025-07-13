@@ -146,6 +146,21 @@ function Clear-Windows {
         $tempDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Temp'
         Set-Title "Cleaning Windows ($tempDir)"
         Remove-Item -Path $tempDir\* -Recurse -Force
+        # Clear CrashDumps folder for all users
+        $crashDumpsDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\CrashDumps'
+        if (Test-Path $crashDumpsDir) {
+            Set-Title "Cleaning CrashDumps ($crashDumpsDir)"
+            Remove-Item -Path "$crashDumpsDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # Clear NVIDIA cache folders for all users
+        $nvidiaCacheFolders = @("DXCache", "GLCache", "OptixCache")
+        foreach ($cacheFolder in $nvidiaCacheFolders) {
+            $nvidiaPath = Join-Path -Path $user.FullName -ChildPath "AppData\Local\NVIDIA\$cacheFolder"
+            if (Test-Path $nvidiaPath) {
+                Set-Title "Cleaning NVIDIA $cacheFolder ($nvidiaPath)"
+                Remove-Item -Path "$nvidiaPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     Set-Title "Cleaning Windows ($env:windir\Temp)"
@@ -211,7 +226,9 @@ if ($all -or $default -or $eventlogs) {
     Clear-WindowsEventlogs
 }
 
-pause "Press any key to exit"
+if ($PauseBeforeExit) {
+    pause "Press any key to exit"
+}
 
 # SIG # Begin signature block
 # MIIbwgYJKoZIhvcNAQcCoIIbszCCG68CAQExDzANBglghkgBZQMEAgEFADB5Bgor

@@ -8,35 +8,44 @@
         {
           "ProgramPath": "C:\\Program Files\\VRCX\\VRCX.exe",
           "KeepRunning": true
+        },
+        {
+          "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Local\\VRCOSC\\VRCOSC.bat"
         }
       ]
     },
     {
       "ProcessName": "vrserver",
       "GracePeriod": "00:00:30",
-      "SubPrograms": []
+      "SubPrograms": [
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\xs-notify\\xs-notify.exe",
+          "Arguments": []
+        }
+      ]
     },
     {
       "ProcessName": "starcitizen",
       "GracePeriod": "00:00:05",
+      "Enabled": false,
       "SubPrograms": [
         {
           "ProgramPath": "C:\\Users\\blusc\\OneDrive\\Games\\Star Citizen\\_TOOLS\\WingmanAI\\WingmanAI.exe",
-          "Arguments": []
+          "Enabled": false
         }
       ]
     },
     {
       "ProcessName": "BattleBit",
       "GracePeriod": "00:00:05",
-      "Enabled": false,
+      "Enabled": true,
       "SubPrograms": [
         {
           "ProgramPath": "D:\\OneDrive\\AHK\\lghub.exe",
           "Arguments": [
             "D:\\OneDrive\\AHK\\Scripts\\bbr.ahk"
           ],
-          "Enabled": false
+          "Enabled": true
         },
         {
           "ProgramPath": "C:\\Program Files (x86)\\Overwolf\\OverwolfLauncher.exe",
@@ -44,7 +53,7 @@
             "--disable-sentry-report -DisableBlackList -launchapp afehdjljenjhcobkfkjempogpejbagjjmphpkglk"
           ],
           "AlwaysRun": true,
-          "Enabled": false
+          "Enabled": true
         }
       ]
     },

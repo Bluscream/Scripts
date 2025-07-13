@@ -47,6 +47,10 @@
 			"items": {
 			  "$ref": "#/definitions/SubProgramData"
 			}
+		  },
+		  "Enabled": {
+			"type": "boolean",
+			"default": true
 		  }
 		},
 		"required": [
@@ -89,6 +93,10 @@
 		  "Delay": {
 			"type": ["string", "null"],
 			"format": "time-span"
+		  },
+		  "Enabled": {
+			"type": "boolean",
+			"default": true
 		  }
 		},
 		"required": [

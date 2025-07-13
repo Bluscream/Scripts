@@ -159,6 +159,7 @@ function Update-Scoop {
     }
     catch {
         Write-Error $_.Exception.Message
+        Write-Warning "Run 'scoop update * -g' manually"
         return $false
     }
 }
@@ -176,12 +177,25 @@ function Update-Chocolatey {
 function Update-Winget {
     try {
         Set-Title 'Updating winget'
-        $cmd = "winget upgrade --all --accept-package-agreements --accept-source-agreements"
-        if ($all -or $includeUnknown) {
-            $cmd += " --include-unknown"
+        try {
+            Install-Module -Name Microsoft.WinGet.Client
+            Import-Module -Name Microsoft.WinGet.Client
+            # Add-WinGetSource -Name mysource -Argument "https://interal.powershellisfun.com/" -Type Microsoft.Rest -Verbose
+            Get-WinGetPackage | Where-Object Source -eq winget | Update-WinGetPackage
+        } catch {
+            Write-Host -ForegroundColor Orange "Failed to update winget through Powershell module"
         }
-        Write-Host $cmd
-        Invoke-Expression $cmd
+        try {
+            $cmd = "winget upgrade --all --accept-package-agreements --accept-source-agreements --verbose"
+            if ($all -or $includeUnknown) {
+                $cmd += " --include-unknown"
+            }
+            Write-Host $cmd
+            Start-Process cmd.exe -ArgumentList "/c $cmd" -WindowStyle Normal
+            # Invoke-Expression $cmd
+        } catch {
+            Write-Host -ForegroundColor Orange "Failed to update winget through winget.exe"
+        }
         return $true
     }
     catch {
@@ -258,7 +272,9 @@ if ($CompleteAction) {
     } else { Write-Host "Failed to perform complete action" -ForegroundColor Red }
 }
 
-pause "Press any key to exit"
+if ($PauseBeforeExit) {
+    pause "Press any key to exit"
+}
 
 # SIG # Begin signature block
 # MIIbwgYJKoZIhvcNAQcCoIIbszCCG68CAQExDzANBglghkgBZQMEAgEFADB5Bgor

@@ -10,8 +10,8 @@ function run {
     # param ($cmd)
     $session = New-SshSession -ComputerName $ip -Credential $credential
     Invoke-SshCommand -SessionId $session.SessionId -Command "uname -a;whoami"
-    Invoke-SshCommandStream -SessionId $session.SessionId -Command "tree /var/log/"
-    Invoke-SshCommandStream -SessionId $session.SessionId -Command $cmd -TimeOut 3
+    # Invoke-SshCommandStream -SessionId $session.SessionId -Command "tree /var/log/"
+    Invoke-SshCommandStream -SessionId $session.SessionId -Command $cmd -TimeOut 30
     Remove-SshSession -SessionId $session.SessionId
     run
 }

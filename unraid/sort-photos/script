@@ -27,12 +27,17 @@ has_arg() {
 }
 clean_dir() {
     local dir="$1"
+    echo "Setting permissions to 0777 for $dir"
+    chmod -Rv 0777 "$dir"
+    echo "Setting owner to nobody:users for $dir"
+    chown -Rv nobody:users "$dir"
     echo "Cleaning up empty files in $dir..."
     find "$dir" -type f -size 0 -delete
     echo "Deleting all '*.*_original' files in $dir..."
     find "$dir" -type f -name "*.*_original" -delete
     echo "Cleaning up empty directories in $dir..."
     find "$dir" -type d -empty -delete
+    mkdir -p "$dir"
     echo "Cleanup complete."
 }
 validate_file() {
@@ -81,7 +86,7 @@ get_file_date() {
 }
 
 do_clean=1 # $(has_arg -clean)
-do_verify=0 # $(has_arg -verify)
+do_verify=1 # $(has_arg -verify)
 do_keep=0 # $(has_arg -keep)
 
 if [ "$do_clean" -eq 1 ]; then
@@ -154,10 +159,11 @@ find "$SOURCE_DIR" -type f | while read -r filepath; do
     fi
     
     # echo "Adding Metadata to $target_path"
-    if ! exiftool -overwrite_original "-Comment=Path: '$abs_src'\nDate: '$date_str'" "$target_path" >&2; then
+    meta="{\"path\": \"$abs_src\",\"taken\": \"$date_str\",\"created\": \"$creation_datetime\",\"md5\": \"$md5_hash\"}"
+    if ! exiftool -overwrite_original "-Comment='$meta'" "$target_path" >&2; then
         echo "Warning: Could not add metadata to $target_path" # >&2
         metadata_file="$target_path.supplemental-metadata.json"
-        echo "{\"Path\": \"$abs_src\",\"Date\": \"$date_str\"}" > "$metadata_file"
+        echo $meta > "$metadata_file"
         echo "Metadata written to $metadata_file"
 
     fi
