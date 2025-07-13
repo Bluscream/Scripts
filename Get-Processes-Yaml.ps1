@@ -6,45 +6,13 @@ if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
 
 # Requires -Modules powershell-yaml
 
-# Check if running as administrator
-function Test-IsAdmin {
-    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)
-    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+# Pre-fetch all Win32_Process objects and index by PID
+$wmiProcs = Get-CimInstance Win32_Process
+$wmiProcById = @{}
+foreach ($w in $wmiProcs) { $wmiProcById[$w.ProcessId] = $w }
 
-$IsAdmin = Test-IsAdmin
-
-# Helper to get process owner
-function Get-ProcessOwner {
-    param($ProcessId)
-    try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
-        $owner = $proc | Invoke-CimMethod -MethodName GetOwner
-        if ($owner.User) { "$($owner.Domain)\\$($owner.User)" } else { $null }
-    } catch { $null }
-}
-
-# Helper to get process working directory
-function Get-ProcessWorkingDirectory {
-    param($ProcessId)
-    try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
-        $proc.ExecutablePath | ForEach-Object {
-            $file = Get-Item $_ -ErrorAction SilentlyContinue
-            if ($file) { $file.DirectoryName } else { $null }
-        }
-    } catch { $null }
-}
-
-# Helper to get process elevation (per-process)
-function Get-ProcessElevation {
-    param($ProcessId)
-    try {
-        $proc = Get-Process -Id $ProcessId -ErrorAction Stop
-        $hProcess = $proc.Handle
-        if (-not $hProcess) { return "Unknown" }
-        $definition = @"
+# Compile .NET types once for elevation and bitness
+$elevationDefinition = @"
 using System;
 using System.Runtime.InteropServices;
 public class TokenInfo {
@@ -56,7 +24,53 @@ public class TokenInfo {
     public const UInt32 TOKEN_QUERY = 0x0008;
 }
 "@
-        Add-Type -TypeDefinition $definition -ErrorAction SilentlyContinue
+Add-Type -TypeDefinition $elevationDefinition -ErrorAction SilentlyContinue
+
+$bitnessDefinition = @"
+using System;
+using System.Runtime.InteropServices;
+public class Kernel32 {
+    [DllImport("kernel32.dll")]
+    public static extern bool IsWow64Process(IntPtr hProcess, ref bool Wow64Process);
+}
+"@
+Add-Type -TypeDefinition $bitnessDefinition -ErrorAction SilentlyContinue
+
+# Check if running as administrator
+function Test-IsAdmin {
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+$IsAdmin = Test-IsAdmin
+
+# Helper to get process owner (from pre-fetched WMI)
+function Get-ProcessOwner {
+    param($WmiProc)
+    try {
+        $owner = $WmiProc | Invoke-CimMethod -MethodName GetOwner
+        if ($owner.User) { "$($owner.Domain)\$($owner.User)" } else { $null }
+    } catch { $null }
+}
+
+# Helper to get process working directory (from pre-fetched WMI)
+function Get-ProcessWorkingDirectory {
+    param($WmiProc)
+    try {
+        $WmiProc.ExecutablePath | ForEach-Object {
+            $file = Get-Item $_ -ErrorAction SilentlyContinue
+            if ($file) { $file.DirectoryName } else { $null }
+        }
+    } catch { $null }
+}
+
+# Helper to get process elevation (per-process)
+function Get-ProcessElevation {
+    param($Process)
+    try {
+        $hProcess = $Process.Handle
+        if (-not $hProcess) { return "Unknown" }
         $tokenHandle = [IntPtr]::Zero
         $opened = [TokenInfo]::OpenProcessToken($hProcess, [TokenInfo]::TOKEN_QUERY, [ref]$tokenHandle)
         if (-not $opened) { return "Unknown" }
@@ -73,13 +87,10 @@ function Get-ProcessBitness {
     try {
         if ($env:PROCESSOR_ARCHITECTURE -eq "AMD64") {
             $isWow64 = $false
-            $sig = 'bool IsWow64Process(IntPtr hProcess, [ref] bool Wow64Process)'
-            $type = Add-Type -MemberDefinition "[DllImport(\"kernel32.dll\")] public static extern $sig;" -Name 'Kernel32' -Namespace 'Win32' -PassThru -ErrorAction SilentlyContinue
-            $type::IsWow64Process($Process.Handle, [ref]$isWow64) | Out-Null
+            [Kernel32]::IsWow64Process($Process.Handle, [ref]$isWow64) | Out-Null
             if ($isWow64) { return "32-bit" } else { return "64-bit" }
         } else { return "32-bit" }
     } catch {
-        # Fallback: try MainModule
         try {
             if ($Process.MainModule.ModuleName -match "(SysWOW64|WOW64)") { return "32-bit" }
             else { return "64-bit" }
@@ -91,13 +102,27 @@ function Get-ProcessBitness {
 $processes = Get-Process | ForEach-Object {
     $proc = $_
     $id = $proc.Id
+    $wmi = $wmiProcById[$id]
+    $missingWmi = $false
     if ($IsAdmin) {
-        $owner = Get-ProcessOwner $id
-        $workdir = Get-ProcessWorkingDirectory $id
+        if ($wmi) {
+            $owner = Get-ProcessOwner $wmi
+            $workdir = Get-ProcessWorkingDirectory $wmi
+            $cmdline = $wmi.CommandLine
+        } else {
+            $missingWmi = $true
+            # Fallbacks (slower)
+            $owner = try {
+                Get-CimInstance Win32_Process -Filter "ProcessId = $id" | Invoke-CimMethod -MethodName GetOwner | ForEach-Object { if ($_.User) { "$($_.Domain)\$($_.User)" } else { $null } }
+            } catch { $null }
+            $workdir = $null
+            $cmdline = try {
+                (Get-CimInstance Win32_Process -Filter "ProcessId = $id").CommandLine
+            } catch { $null }
+        }
         $bitness = try { Get-ProcessBitness $proc } catch { "Unknown" }
-        $cmdline = try { (Get-CimInstance Win32_Process -Filter "ProcessId = $id").CommandLine } catch { $null }
-        $elevated = try { Get-ProcessElevation $id } catch { "Unknown" }
-        [PSCustomObject]@{
+        $elevated = try { Get-ProcessElevation $proc } catch { "Unknown" }
+        $yamlObj = [PSCustomObject]@{
             Name        = $proc.ProcessName
             Id          = $id
             Path        = $proc.Path
@@ -110,6 +135,11 @@ $processes = Get-Process | ForEach-Object {
             CPU         = $proc.CPU
             MemoryMB    = [math]::Round($proc.WorkingSet / 1MB, 2)
         }
+        if ($missingWmi) {
+            # Add a comment property to indicate missing WMI data
+            # Add-Member -InputObject $yamlObj -NotePropertyName "_comment" -NotePropertyValue "WMI data missing, used fallback methods. Some fields may be incomplete."
+        }
+        $yamlObj
     } else {
         [PSCustomObject]@{
             Name        = $proc.ProcessName

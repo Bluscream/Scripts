@@ -19,19 +19,18 @@ function Test-IsAdmin {
 
 $IsAdmin = Test-IsAdmin
 
-# Helper to get service details
-function Get-ServiceDetails {
-    param($Service)
-    try {
-        $wmi = Get-CimInstance -ClassName Win32_Service -Filter "Name = '$($Service.Name)'" -ErrorAction SilentlyContinue
-        return $wmi
-    } catch { return $null }
+# Fetch all Win32_Service objects at once for performance
+$allServiceDetails = @{}
+if ($IsAdmin) {
+    foreach ($wmi in Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue) {
+        $allServiceDetails[$wmi.Name] = $wmi
+    }
 }
 
 $services = Get-Service -ErrorAction SilentlyContinue | ForEach-Object {
     $svc = $_
     if ($IsAdmin) {
-        $details = Get-ServiceDetails $svc
+        $details = $allServiceDetails[$svc.Name]
         [PSCustomObject]@{
             Name        = $svc.Name
             DisplayName = $svc.DisplayName
