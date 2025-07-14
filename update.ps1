@@ -178,6 +178,7 @@ function Update-Winget {
     try {
         Set-Title 'Updating winget'
         try {
+            Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted -ErrorAction SilentlyContinue
             Install-Module -Name Microsoft.WinGet.Client
             Import-Module -Name Microsoft.WinGet.Client
             # Add-WinGetSource -Name mysource -Argument "https://interal.powershellisfun.com/" -Type Microsoft.Rest -Verbose
