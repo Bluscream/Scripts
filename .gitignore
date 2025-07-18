@@ -32,3 +32,9 @@ hmdq/
 * copy.*
 *- Copy (*).ini
 *.disabled
+/drives/
+/unraid/
+!/unraid/config/plugins/user.scripts/scripts
+*.cer
+/vm/Easy-GPU-PV/
+es.exe

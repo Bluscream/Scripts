@@ -1,9 +1,0 @@
-#!/bin/bash
-
-mkdir -p "/mnt/disks/blu-pc-old-c"
-fdisk -l "/mnt/user/backups/Timo/PC/Drives/c.img"
-mount -r -t ntfs -o loop,offset=240123904 "/mnt/user/backups/Timo/PC/Drives/c.img" "/mnt/disks/blu-pc-old-c"
-
-mkdir -p "/mnt/disks/betty-laptop-c"
-fdisk -l "/mnt/user/backups/Bettina/Laptop/drives/c.img"
-mount -r -t ntfs -o loop,offset=290455552 "/mnt/user/backups/Bettina/Laptop/drives/c.img" "/mnt/disks/betty-laptop-c"

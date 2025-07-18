@@ -1,8 +1,0 @@
-#!/bin/bash
-lsof -i tcp:80
-lsof -i tcp:443
-
-killall tailscale
-
-/etc/rc.d/rc.nginx stop
-/etc/rc.d/rc.nginx start

@@ -1,2 +1,0 @@
-#!/bin/bash
-qemu-img convert -p -O raw /dev/sdh /mnt/user/Backups/USB/disk.img

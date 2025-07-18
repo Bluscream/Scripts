@@ -161,6 +161,17 @@ function Clear-Windows {
                 Remove-Item -Path "$nvidiaPath\*" -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
+        # Clear INetCache and WebCache folders for all users
+        $inetCacheDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Microsoft\Windows\INetCache'
+        if (Test-Path $inetCacheDir) {
+            Set-Title "Cleaning INetCache ($inetCacheDir)"
+            Remove-Item -Path "$inetCacheDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $webCacheDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Microsoft\Windows\WebCache'
+        if (Test-Path $webCacheDir) {
+            Set-Title "Cleaning WebCache ($webCacheDir)"
+            Remove-Item -Path "$webCacheDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Set-Title "Cleaning Windows ($env:windir\Temp)"
