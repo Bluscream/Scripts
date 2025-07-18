@@ -17,15 +17,28 @@ param(
     [switch]$Restore,
 
     [Parameter(Mandatory=$false)]
-    [switch]$Clear
+    [switch]$Clear,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoPersist
 )
 
-Write-Verbose '--- Get-PSDrive ---'
-Get-PSDrive | Out-String | Write-Verbose
-Write-Verbose '--- Get-WmiObject -Class Win32_MappedLogicalDisk ---'
-Get-WmiObject -Class Win32_MappedLogicalDisk | Out-String | Write-Verbose
-Write-Verbose '--- Get-CimInstance -ClassName Win32_MappedLogicalDisk ---'
-Get-CimInstance -ClassName Win32_MappedLogicalDisk | Out-String | Write-Verbose
+function To-ProperCase {
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [string]$InputString
+    )
+    process {
+        if ($null -eq $InputString) { return $null }
+        return (($InputString -split ' ') | ForEach-Object {
+            if ($_.Length -gt 0) {
+                $_.Substring(0,1).ToUpper() + $_.Substring(1).ToLower()
+            } else {
+                $_
+            }
+        }) -join ' '
+    }
+}
 
 function Get-MappedDrives {
     param(
@@ -36,13 +49,12 @@ function Get-MappedDrives {
         $Scope = 'CurrentUser'
     }
     if ($Scope -eq 'CurrentUser') {
-        $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' }
-        return $drives
+        return Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' }
     }
 }
 
 function Remove-AllMappedDrives {
-    $currentDrives = Get-MappedDrives
+    $currentDrives = Get-MappedDrives -Scope $Scope
     foreach ($drive in $currentDrives) {
         $letter = $drive.Name
         Try {
@@ -55,7 +67,16 @@ function Remove-AllMappedDrives {
     }
 }
 
-if ($Clear -and -not ($Backup -or $Restore -or $BackupScript)) {
+Write-Verbose '--- Get-PSDrive ---'
+Get-MappedDrives -Scope $Scope | Format-Table | Out-String | Write-Verbose
+
+Write-Verbose '--- Get-WmiObject -Class Win32_MappedLogicalDisk ---'
+Get-WmiObject -Class Win32_MappedLogicalDisk | Format-Table | Out-String | Write-Verbose
+
+Write-Verbose '--- Get-CimInstance -ClassName Win32_MappedLogicalDisk ---'
+Get-CimInstance -ClassName Win32_MappedLogicalDisk | Format-Table | Out-String | Write-Verbose
+
+if ($Clear -and -not ($Backup -or $Restore)) {
     Remove-AllMappedDrives
     Write-Host 'All mapped drives cleared.'
     exit 0
@@ -85,13 +106,13 @@ function Get-NetworkDriveDescription {
         try {
             $mapped = Get-CimInstance -ClassName Win32_MappedLogicalDisk | Where-Object { $_.DeviceID -eq ("${DriveLetter}:") }
             if ($mapped -and $mapped.VolumeName) {
-                $desc = $mapped.VolumeName
+                $desc = $mapped.VolumeName | To-ProperCase
             }
         } catch {}
     }
     if ([string]::IsNullOrWhiteSpace($desc)) {
         if ($UNCPath -match "^\\\\([^\\]+)\\([^\\]+)") {
-            $desc = "$($matches[1])\\$($matches[2])"
+            $desc = "$($matches[2]) ($($matches[1]))" | To-ProperCase
         } else {
             $desc = ''
         }
@@ -113,17 +134,22 @@ function Generate-BackupScript {
     $BackupScriptContent += '    param('
     $BackupScriptContent += '        [string]$DriveLetter,'
     $BackupScriptContent += '        [string]$UNCPath,'
-    $BackupScriptContent += '        [string]$Description'
+    $BackupScriptContent += '        [string]$Description,'
+    $BackupScriptContent += '        [bool]$ReconnectAtSignIn'
     $BackupScriptContent += '    )'
     $BackupScriptContent += '    Try {'
     $BackupScriptContent += '        # Try with saved credentials'
-    $BackupScriptContent += '        New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Description $Description -ErrorAction Stop'
+    $BackupScriptContent += '        $persistParam = if ($ReconnectAtSignIn) { "-Persist" } else { "" }'
+    $BackupScriptContent += '        $cmd = "New-PSDrive -Name `$DriveLetter -PSProvider FileSystem -Root `$UNCPath -Scope Global $persistParam -Description `$Description -ErrorAction Stop"'
+    $BackupScriptContent += '        Invoke-Expression $cmd'
     $BackupScriptContent += '        Write-Host "Restored $DriveLetter to $UNCPath using saved credentials."'
     $BackupScriptContent += '    } Catch {'
     $BackupScriptContent += '        Write-Warning "Failed to restore $DriveLetter to $UNCPath with saved credentials. Prompting for credentials..."'
     $BackupScriptContent += '        $cred = Get-Credential -Message "Enter credentials for $UNCPath"'
     $BackupScriptContent += '        Try {'
-    $BackupScriptContent += '            New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Credential $cred -Description $Description -ErrorAction Stop'
+    $BackupScriptContent += '            $persistParam = if ($ReconnectAtSignIn) { "-Persist" } else { "" }'
+    $BackupScriptContent += '            $cmd = "New-PSDrive -Name `$DriveLetter -PSProvider FileSystem -Root `$UNCPath -Scope Global $persistParam -Credential `$cred -Description `$Description -ErrorAction Stop"'
+    $BackupScriptContent += '            Invoke-Expression $cmd'
     $BackupScriptContent += '            Write-Host "Restored $DriveLetter to $UNCPath with prompted credentials."'
     $BackupScriptContent += '        } Catch {'
     $BackupScriptContent += '            Write-Error "Failed to restore $DriveLetter to $UNCPath."'
@@ -135,7 +161,8 @@ function Generate-BackupScript {
         $letter = $drive.DriveLetter
         $unc = $drive.UNCPath
         $desc = $drive.Description
-        $BackupScriptContent += "Restore-Drive -DriveLetter '$letter' -UNCPath '$unc' -Description '$desc'"
+        $reconnect = $drive.ReconnectAtSignIn
+        $BackupScriptContent += "Restore-Drive -DriveLetter '$letter' -UNCPath '$unc' -Description '$desc' -Persist `$reconnect"
     }
     $BackupScriptContent += ''
     $BackupScriptContent += 'Write-Host "All drives processed."'
@@ -157,6 +184,7 @@ if ($Backup) {
             DriveLetter = $letter
             UNCPath = $unc
             Description = $desc
+            ReconnectAtSignIn = -not [bool]$NoPersist
         }
     }
     $driveData | ConvertTo-Json | Set-Content -Encoding UTF8 $backupJsonPath
@@ -179,14 +207,21 @@ if ($Restore) {
     }
     if ($Clear) { Remove-AllMappedDrives; Write-Host 'All mapped drives cleared before restore.' }
     $driveData = Get-Content $backupJsonPath | ConvertFrom-Json
+    $driveData | Select-Object DriveLetter, UNCPath, Description, ReconnectAtSignIn | Format-Table -AutoSize | Out-String | Write-Host
     function Restore-Drive {
         param(
             [string]$DriveLetter,
             [string]$UNCPath,
-            [string]$Description
+            [string]$Description,
+            [bool]$ReconnectAtSignIn
         )
+        $NoPersist = -not $ReconnectAtSignIn
         Try {
-            New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Description $Description -ErrorAction Stop
+            if (-not $NoPersist) {
+                New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Description $Description -ErrorAction Stop
+            } else {
+                New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Description $Description -ErrorAction Stop
+            }
             Write-Host "Restored $DriveLetter to $UNCPath using saved credentials."
         } Catch {
             Write-Error "Error details: $($_.Exception.Message)"
@@ -196,7 +231,11 @@ if ($Restore) {
             Write-Warning "Failed to restore $DriveLetter to $UNCPath with saved credentials. Prompting for credentials..."
             $cred = Get-Credential -Message "Enter credentials for $UNCPath"
             Try {
-                New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Credential $cred -Description $Description -ErrorAction Stop
+                if (-not $NoPersist) {
+                    New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Persist -Credential $cred -Description $Description -ErrorAction Stop
+                } else {
+                    New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $UNCPath -Scope Global -Credential $cred -Description $Description -ErrorAction Stop
+                }
                 Write-Host "Restored $DriveLetter to $UNCPath with prompted credentials."
             } Catch {
                 Write-Error "Error details $($_.Exception.Message)"
@@ -205,7 +244,7 @@ if ($Restore) {
         }
     }
     foreach ($drive in $driveData) {
-        Restore-Drive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath -Description $drive.Description
+        Restore-Drive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath -Description $drive.Description -ReconnectAtSignIn ([bool]$drive.ReconnectAtSignIn)
     }
     Write-Host "All drives processed."
     exit 0
