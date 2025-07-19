@@ -43,9 +43,23 @@ function To-ProperCase {
         }) -join ' '
     }
 }
+function New-DriveDataObject {
+    param(
+        [string]$DriveLetter,
+        [string]$UNCPath,
+        [string]$Description = '',
+        [bool]$ReconnectAtSignIn = -not $NoPersist
+    )
+    return [PSCustomObject]@{
+        DriveLetter = $DriveLetter
+        UNCPath = $UNCPath
+        Description = $Description
+        ReconnectAtSignIn = $ReconnectAtSignIn
+    }
+}
 function Get-AllAvailableDrives {
     # Returns all available UNC paths on the current networks as seen in Windows Explorer's "Network" location.
-    # Output: Array of objects with properties: UNCPath, Name, Type
+    # Output: Array of New-DriveDataObject objects
 
     $driveData = @()
 
@@ -80,11 +94,7 @@ function Get-AllAvailableDrives {
             }
             foreach ($share in $shares) {
                 if ($share -and $share -ne 'IPC$') {
-                    $driveData += [PSCustomObject]@{
-                        UNCPath = "\\$computer\$share"
-                        Name    = "$computer\$share"
-                        Type    = 'Share'
-                    }
+                    $driveData += New-DriveDataObject -DriveLetter '' -UNCPath "\\$computer\$share" -Description "$share ($computer)"
                 }
             }
         } catch {}
@@ -92,8 +102,6 @@ function Get-AllAvailableDrives {
 
     return $driveData
 }
-Write-Host $(Get-AllAvailableDrives)
-exit 0
 function Get-MappedDrives {
     param(
         [string]$Scope
@@ -102,20 +110,29 @@ function Get-MappedDrives {
         Write-Warning 'Machine scope for mapped drives is not fully supported. Defaulting to CurrentUser.'
         $Scope = 'CurrentUser'
     }
+    $driveData = @()
     if ($Scope -eq 'CurrentUser') {
-        return Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' }
+        $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' }
+        foreach ($drive in $drives) {
+            $letter = $drive.Name
+            $unc = $drive.DisplayRoot.TrimEnd([char]0)
+            $desc = Get-MappedDriveDescription -DriveLetter $letter -UNCPath $unc
+            $reconnect = $true
+            $driveData += New-DriveDataObject -DriveLetter $letter -UNCPath $unc -Description $desc -ReconnectAtSignIn $reconnect
+        }
     }
+    return $driveData
 }
 function Remove-AllMappedDrives {
     $currentDrives = Get-MappedDrives -Scope $Scope
     foreach ($drive in $currentDrives) {
-        $letter = $drive.Name
+        $letter = $drive.DriveLetter
         Try {
-            Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop
-            net use "$($drive.Name):" /delete /y | Out-Null
-            Write-Host "Removed mapped drive $($drive.Name)."
+            Remove-PSDrive -Name $letter -Force -ErrorAction Stop
+            net use "$($letter):" /delete /y | Out-Null
+            Write-Host "Removed mapped drive $letter."
         } Catch {
-            Write-Warning "Failed to remove mapped drive $($drive.Name). $_"
+            Write-Warning "Failed to remove mapped drive $letter. $_"
         }
     }
 }
@@ -351,16 +368,9 @@ Get-CimInstance -ClassName Win32_MappedLogicalDisk | Format-Table | Out-String |
 if ($Test -and -not ($Backup -or $Restore)) {
     $driveData = Get-MappedDrives -Scope $Scope
     foreach ($drive in $driveData) {
-        $result = Test-NetworkDrive -DriveLetter $drive.Name -UNCPath $drive.DisplayRoot
-        Write-Host "Test-NetworkDrive for $($drive.Name) $($drive.DisplayRoot) => $result"
+        $result = Test-NetworkDrive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath
+        Write-Host "Test-NetworkDrive for $($drive.DriveLetter) $($drive.UNCPath) => $result"
     }
-    exit 0
-}
-
-if ($Clear -and -not ($Backup -or $Restore)) {
-    Remove-AllMappedDrives
-    Write-Host 'All mapped drives cleared.'
-    exit 0
 }
 
 if ($Backup) {
@@ -374,12 +384,7 @@ if ($Backup) {
         $letter = $drive.Name
         $unc = $drive.DisplayRoot.TrimEnd([char]0)
         $desc = Get-MappedDriveDescription -DriveLetter $letter -UNCPath $unc
-        $driveData += [PSCustomObject]@{
-            DriveLetter = $letter
-            UNCPath = $unc
-            Description = $desc
-            ReconnectAtSignIn = -not [bool]$NoPersist
-        }
+        $driveData += New-DriveDataObject -DriveLetter $letter -UNCPath $unc -Description $desc -ReconnectAtSignIn (-not [bool]$NoPersist)
     }
     $driveData | ConvertTo-Json | Set-Content -Encoding UTF8 $backupJsonPath
     Write-Host "Backup JSON saved to $backupJsonPath."
@@ -392,6 +397,11 @@ if ($Backup) {
     $BackupScriptContent | Set-Content -Encoding UTF8 $backupScriptPath
     Write-Host "Restore script saved to $backupScriptPath."
     if ($Clear) { Remove-AllMappedDrives; Write-Host 'All mapped drives cleared after backup.' }
+}
+
+if ($Clear -and -not ($Backup -or $Restore)) {
+    Remove-AllMappedDrives
+    Write-Host 'All mapped drives cleared.'
 }
 
 if ($Restore) {
