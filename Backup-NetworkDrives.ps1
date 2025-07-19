@@ -20,7 +20,10 @@ param(
     [switch]$Clear,
 
     [Parameter(Mandatory=$false)]
-    [switch]$NoPersist
+    [switch]$NoPersist,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Test
 )
 
 # region FUNCTIONS
@@ -40,6 +43,57 @@ function To-ProperCase {
         }) -join ' '
     }
 }
+function Get-AllAvailableDrives {
+    # Returns all available UNC paths on the current networks as seen in Windows Explorer's "Network" location.
+    # Output: Array of objects with properties: UNCPath, Name, Type
+
+    $driveData = @()
+
+    # Get all computers visible in the network neighborhood
+    try {
+        $networkComputers = Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Name
+        if (-not $networkComputers) {
+            $networkComputers = @()
+        }
+    } catch {
+        $networkComputers = @()
+    }
+
+    # Use Net View to enumerate network computers if WMI fails or returns nothing
+    if ($networkComputers.Count -eq 0) {
+        try {
+            $netView = net view | Select-String '\\\\'
+            foreach ($line in $netView) {
+                $name = ($line -replace '^\s*\\\\', '').Split(' ')[0]
+                if ($name) {
+                    $networkComputers += $name
+                }
+            }
+        } catch {}
+    }
+
+    foreach ($computer in $networkComputers | Sort-Object -Unique) {
+        # Get shared folders for each computer
+        try {
+            $shares = net view "\\$computer" 2>$null | Select-String 'Disk' | ForEach-Object {
+                ($_ -replace '^\s+', '').Split(' ')[0]
+            }
+            foreach ($share in $shares) {
+                if ($share -and $share -ne 'IPC$') {
+                    $driveData += [PSCustomObject]@{
+                        UNCPath = "\\$computer\$share"
+                        Name    = "$computer\$share"
+                        Type    = 'Share'
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    return $driveData
+}
+Write-Host $(Get-AllAvailableDrives)
+exit 0
 function Get-MappedDrives {
     param(
         [string]$Scope
@@ -235,7 +289,7 @@ function Generate-BackupScript {
     $BackupScriptContent += 'Write-Host "All drives processed."'
     return $BackupScriptContent
 }
-function Test-Path {
+function Test-PathAccess {
     param(
         [string]$Path
     )
@@ -246,7 +300,7 @@ function Test-Path {
         Get-ChildItem -Path $Path -ErrorAction Stop | Out-Null
         $canRead = $true
     } catch {
-        Write-Error "[Test-Path] Cannot read from $($Path) $($_.Exception.Message)"
+        Write-Error "[Test-PathAccess] Cannot read from $Path $($_.Exception.Message)"
     }
     try {
         $tempFile = Join-Path $Path ("test_" + [guid]::NewGuid().ToString() + ".tmp")
@@ -254,11 +308,11 @@ function Test-Path {
         Remove-Item -Path $tempFile -Force -ErrorAction Stop
         $canWrite = $true
     } catch {
-        Write-Warning "[Test-Path] Cannot write to $($Path) $($_.Exception.Message)"
+        Write-Warning "[Test-PathAccess] Cannot write to $Path $($_.Exception.Message)"
     }
     $stopwatch.Stop()
     $elapsedMs = $stopwatch.ElapsedMilliseconds
-    Write-Host "[Test-Path] CanRead: $canRead, CanWrite: $canWrite, ElapsedMs: $elapsedMs for $Path"
+    Write-Host "[Test-PathAccess] CanRead $canRead, CanWrite $canWrite, ElapsedMs $elapsedMs for $Path"
     return [PSCustomObject]@{
         canRead   = $canRead
         canWrite  = $canWrite
@@ -276,12 +330,12 @@ function Test-NetworkDrive {
     if ($mounted) {
         $pathToTest = "$($DriveLetter):\"
         # Local drive, no credential needed
-        $testResult = Test-Path -Path $pathToTest
+        $testResult = Test-PathAccess -Path $pathToTest
     } else {
         $pathToTest = $UNCPath
         $hostName = (($UNCPath -replace '^\\\\([^\\]+)\\.*', '$1'))
         Write-Host "$UNCPath ($hostName)"
-        $testResult = Test-Path -Path $UNCPath
+        $testResult = Test-PathAccess -Path $UNCPath
     }
     return ($testResult.canRead -and $testResult.canWrite)
 }
@@ -289,12 +343,19 @@ function Test-NetworkDrive {
 # region LOGIC
 Write-Verbose '--- Get-PSDrive ---'
 Get-MappedDrives -Scope $Scope | Format-Table | Out-String | Write-Verbose
-
 Write-Verbose '--- Get-WmiObject -Class Win32_MappedLogicalDisk ---'
 Get-WmiObject -Class Win32_MappedLogicalDisk | Format-Table | Out-String | Write-Verbose
-
 Write-Verbose '--- Get-CimInstance -ClassName Win32_MappedLogicalDisk ---'
 Get-CimInstance -ClassName Win32_MappedLogicalDisk | Format-Table | Out-String | Write-Verbose
+
+if ($Test -and -not ($Backup -or $Restore)) {
+    $driveData = Get-MappedDrives -Scope $Scope
+    foreach ($drive in $driveData) {
+        $result = Test-NetworkDrive -DriveLetter $drive.Name -UNCPath $drive.DisplayRoot
+        Write-Host "Test-NetworkDrive for $($drive.Name) $($drive.DisplayRoot) => $result"
+    }
+    exit 0
+}
 
 if ($Clear -and -not ($Backup -or $Restore)) {
     Remove-AllMappedDrives
@@ -342,10 +403,14 @@ if ($Restore) {
     $driveData = Get-Content $backupJsonPath | ConvertFrom-Json
     $driveData | Select-Object DriveLetter, UNCPath, Description, ReconnectAtSignIn | Format-Table -AutoSize | Out-String | Write-Host
     foreach ($drive in $driveData) {
-        if (-not (Test-NetworkDrive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath)) {
-            Restore-Drive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath -Description $drive.Description -ReconnectAtSignIn ([bool]$drive.ReconnectAtSignIn)
+        if ($Test) {
+            $testResult = Test-NetworkDrive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath
+            Write-Host "Test-NetworkDrive for $($drive.DriveLetter): $($drive.UNCPath) => $testResult"
+            if ($testResult) {
+                Restore-Drive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath -Description $drive.Description -ReconnectAtSignIn ([bool]$drive.ReconnectAtSignIn)
+            }
         } else {
-            Write-Host "Drive $($drive.DriveLetter): already mapped to $($drive.UNCPath). Skipping."
+            Restore-Drive -DriveLetter $drive.DriveLetter -UNCPath $drive.UNCPath -Description $drive.Description -ReconnectAtSignIn ([bool]$drive.ReconnectAtSignIn)
         }
     }
     Write-Host "All drives processed."
