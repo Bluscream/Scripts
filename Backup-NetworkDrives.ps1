@@ -235,71 +235,55 @@ function Generate-BackupScript {
     $BackupScriptContent += 'Write-Host "All drives processed."'
     return $BackupScriptContent
 }
+function Test-Path {
+    param(
+        [string]$Path
+    )
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $canRead = $false
+    $canWrite = $false
+    try {
+        Get-ChildItem -Path $Path -ErrorAction Stop | Out-Null
+        $canRead = $true
+    } catch {
+        Write-Error "[Test-Path] Cannot read from $($Path) $($_.Exception.Message)"
+    }
+    try {
+        $tempFile = Join-Path $Path ("test_" + [guid]::NewGuid().ToString() + ".tmp")
+        Set-Content -Path $tempFile -Value 'test' -ErrorAction Stop
+        Remove-Item -Path $tempFile -Force -ErrorAction Stop
+        $canWrite = $true
+    } catch {
+        Write-Warning "[Test-Path] Cannot write to $($Path) $($_.Exception.Message)"
+    }
+    $stopwatch.Stop()
+    $elapsedMs = $stopwatch.ElapsedMilliseconds
+    Write-Host "[Test-Path] CanRead: $canRead, CanWrite: $canWrite, ElapsedMs: $elapsedMs for $Path"
+    return [PSCustomObject]@{
+        canRead   = $canRead
+        canWrite  = $canWrite
+        elapsedMs = $elapsedMs
+    }
+}
 function Test-NetworkDrive {
     param(
         [string]$DriveLetter,
         [string]$UNCPath
     )
     $mounted = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -eq $DriveLetter -and $_.DisplayRoot -eq $UNCPath }
-    $canRead = $false
-    $canWrite = $false
     $pathToTest = $null
+    $testResult = $null
     if ($mounted) {
         $pathToTest = "$($DriveLetter):\"
         # Local drive, no credential needed
-        try {
-            Get-ChildItem -Path $pathToTest -ErrorAction Stop | Out-Null
-            $canRead = $true
-        } catch {
-            Write-Host "[Test-NetworkDrive] Cannot read from $($pathToTest): $($_.Exception.Message)"
-        }
-        try {
-            $tempFile = Join-Path $pathToTest ("test_" + [guid]::NewGuid().ToString() + ".tmp")
-            Set-Content -Path $tempFile -Value 'test' -ErrorAction Stop
-            Remove-Item -Path $tempFile -Force -ErrorAction Stop
-            $canWrite = $true
-        } catch {
-            Write-Host "[Test-NetworkDrive] Cannot write to $($pathToTest): $($_.Exception.Message)"
-        }
+        $testResult = Test-Path -Path $pathToTest
     } else {
         $pathToTest = $UNCPath
         $hostName = (($UNCPath -replace '^\\\\([^\\]+)\\.*', '$1'))
         Write-Host "$UNCPath ($hostName)"
-        $cred = Get-NetworkDriveCredentials -Hostname $hostName
-        if ($cred) {
-            # Use a temporary PSDrive to test access with credentials
-            $tempName = ([char]([int][char]'Z' - 1)).ToString()
-            try {
-                New-PSDrive -Name $tempName -PSProvider FileSystem -Root $UNCPath -Credential $cred -Scope Global -ErrorAction Stop
-                $testPath = "$($tempName):\"
-                try {
-                    Get-ChildItem -Path $testPath -ErrorAction Stop | Out-Null
-                    $canRead = $true
-                } catch {
-                    Write-Host "[Test-NetworkDrive] Cannot read from $($testPath): $($_.Exception.Message)"
-                }
-                try {
-                    $tempFile = Join-Path $testPath ("test_" + [guid]::NewGuid().ToString() + ".tmp")
-                    Set-Content -Path $tempFile -Value 'test' -ErrorAction Stop
-                    Remove-Item -Path $tempFile -Force -ErrorAction Stop
-                    $canWrite = $true
-                } catch {
-                    Write-Host "[Test-NetworkDrive] Cannot write to $($testPath): $($_.Exception.Message)"
-                }
-                Remove-PSDrive -Name $tempName -Force -ErrorAction SilentlyContinue
-            } catch {
-                if ($_.Exception.Message -like '*Multiple connections to a server or shared resource by the same user*') {
-                    Write-Host "[Test-NetworkDrive] Windows does not allow multiple connections to $UNCPath with different credentials. Disconnect all previous connections to $hostName and try again."
-                } else {
-                    Write-Host "[Test-NetworkDrive] Could not mount $UNCPath with credentials: $($_.Exception.Message)"
-                }
-            }
-        } else {
-            Write-Host "[Test-NetworkDrive] No credentials available for $UNCPath"
-        }
+        $testResult = Test-Path -Path $UNCPath
     }
-    Write-Host "[Test-NetworkDrive] CanRead: $canRead, CanWrite: $canWrite for $pathToTest"
-    return ($canRead -and $canWrite)
+    return ($testResult.canRead -and $testResult.canWrite)
 }
 # endregion FUNCTIONS
 # region LOGIC
