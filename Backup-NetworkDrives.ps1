@@ -244,7 +244,7 @@ function Restore-Drive {
         }
     }
 }
-function Generate-BackupScript {
+function Generate-RestoreScript {
     param(
         [array]$DriveData
     )
@@ -365,7 +365,7 @@ if ($Backup) {
         Write-Error "Backup JSON file $backupJsonPath not found."
         exit 1
     }
-    $BackupScriptContent = Generate-BackupScript -DriveData $drives
+    $BackupScriptContent = Generate-RestoreScript -DriveData $drives
     $BackupScriptContent | Set-Content -Encoding UTF8 $backupScriptPath
     Write-Host "Restore script saved to $backupScriptPath."
     if ($Clear) { Remove-AllMappedDrives; Write-Host 'All mapped drives cleared after backup.' }
