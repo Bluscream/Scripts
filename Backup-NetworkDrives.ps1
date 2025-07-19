@@ -250,57 +250,37 @@ function Generate-BackupScript {
     )
     $BackupScriptContent = @()
     $BackupScriptContent += '# This script restores mapped network drives.'
-    $BackupScriptContent += 'param('
-    $BackupScriptContent += '    [switch]$ForcePrompt'
-    $BackupScriptContent += ')'
     $BackupScriptContent += ''
-    $BackupScriptContent += 'function Restore-Drive {'
-    $BackupScriptContent += '    param('
-    $BackupScriptContent += '        [string]$DriveLetter,'
-    $BackupScriptContent += '        [string]$UNCPath,'
-    $BackupScriptContent += '        [string]$Description,'
-    $BackupScriptContent += '        [bool]$ReconnectAtSignIn'
-    $BackupScriptContent += '    )'
-    $BackupScriptContent += '    Try {'
-    $BackupScriptContent += '        $psDriveParams = @{'
-    $BackupScriptContent += '            Name = $DriveLetter'
-    $BackupScriptContent += '            PSProvider = "FileSystem"'
-    $BackupScriptContent += '            Root = $UNCPath'
-    $BackupScriptContent += '            Scope = "Global"'
-    $BackupScriptContent += '            Description = $Description'
-    $BackupScriptContent += '            ErrorAction = "Stop"'
-    $BackupScriptContent += '        }'
-    $BackupScriptContent += '        if ($ReconnectAtSignIn) { $psDriveParams["Persist"] = $true }'
-    $BackupScriptContent += '        New-PSDrive @psDriveParams'
-    $BackupScriptContent += '        Write-Host "Restored $DriveLetter to $UNCPath using saved credentials."'
-    $BackupScriptContent += '    } Catch {'
-    $BackupScriptContent += '        Write-Warning "Failed to restore $DriveLetter to $UNCPath with saved credentials. Prompting for credentials..."'
-    $BackupScriptContent += '        $cred = Get-Credential -Message "Enter credentials for $UNCPath"'
-    $BackupScriptContent += '        Try {'
-    $BackupScriptContent += '            $psDriveParams = @{'
-    $BackupScriptContent += '                Name = $DriveLetter'
-    $BackupScriptContent += '                PSProvider = "FileSystem"'
-    $BackupScriptContent += '                Root = $UNCPath'
-    $BackupScriptContent += '                Scope = "Global"'
-    $BackupScriptContent += '                Credential = $cred'
-    $BackupScriptContent += '                Description = $Description'
-    $BackupScriptContent += '                ErrorAction = "Stop"'
-    $BackupScriptContent += '            }'
-    $BackupScriptContent += '            if ($ReconnectAtSignIn) { $psDriveParams["Persist"] = $true }'
-    $BackupScriptContent += '            New-PSDrive @psDriveParams'
-    $BackupScriptContent += '            Write-Host "Restored $DriveLetter to $UNCPath with prompted credentials."'
-    $BackupScriptContent += '        } Catch {'
-    $BackupScriptContent += '            Write-Error "Failed to restore $DriveLetter to $UNCPath."'
-    $BackupScriptContent += '        }'
+    $BackupScriptContent += 'function Is-RunAsAdmin {'
+    $BackupScriptContent += '    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()'
+    $BackupScriptContent += '    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)'
+    $BackupScriptContent += '    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)'
+    $BackupScriptContent += '}'
+    $BackupScriptContent += ''
+    $BackupScriptContent += 'function Elevate-Self {'
+    $BackupScriptContent += '    $myInvocation = $MyInvocation'
+    $BackupScriptContent += '    $psi = New-Object System.Diagnostics.ProcessStartInfo'
+    $BackupScriptContent += '    $psi.FileName = (Get-Process -Id $PID).Path'
+    $BackupScriptContent += '    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$($myInvocation.MyCommand.Definition)"""'
+    $BackupScriptContent += '    $psi.Verb = "runas"'
+    $BackupScriptContent += '    try {'
+    $BackupScriptContent += '        [System.Diagnostics.Process]::Start($psi) | Out-Null'
+    $BackupScriptContent += '        exit'
+    $BackupScriptContent += '    } catch {'
+    $BackupScriptContent += '        Write-Warning "Elevation cancelled or failed."'
+    $BackupScriptContent += '        exit 1'
     $BackupScriptContent += '    }'
     $BackupScriptContent += '}'
     $BackupScriptContent += ''
+    $BackupScriptContent += 'if (-not (Is-RunAsAdmin)) {'
+    $BackupScriptContent += '    Write-Host "Script is not running as administrator. Attempting to relaunch with elevation..."'
+    $BackupScriptContent += '    Elevate-Self'
+    $BackupScriptContent += '    exit'
+    $BackupScriptContent += '}'
+    $BackupScriptContent += ''
     foreach ($drive in $DriveData) {
-        $letter = $drive.DriveLetter
-        $unc = $drive.UNCPath
-        $desc = $drive.Description
-        $reconnect = $drive.ReconnectAtSignIn
-        $BackupScriptContent += "Restore-Drive -DriveLetter '$letter' -UNCPath '$unc' -Description '$desc' -ReconnectAtSignIn `$reconnect"
+        $persistFlag = if ($drive.ReconnectAtSignIn) { '-Persist' } else { '' }
+        $BackupScriptContent += "New-PSDrive -Scope Global -PSProvider FileSystem -Name $($drive.DriveLetter) -Root '$($drive.UNCPath)' -Description '$($drive.Description)' $persistFlag"
     }
     $BackupScriptContent += ''
     $BackupScriptContent += 'Write-Host "All drives processed."'
@@ -374,26 +354,18 @@ if ($Test -and -not ($Backup -or $Restore)) {
 }
 
 if ($Backup) {
-    $drives = Get-MappedDrives -Scope $Scope
+    $drives = Get-MappedDrives -Scope $Scope # returns list of New-DriveDataObject
     if (!$drives) {
         Write-Host 'No mapped network drives found.'
         exit 0
     }
-    $driveData = @()
-    foreach ($drive in $drives) {
-        $letter = $drive.Name
-        $unc = $drive.DisplayRoot.TrimEnd([char]0)
-        $desc = Get-MappedDriveDescription -DriveLetter $letter -UNCPath $unc
-        $driveData += New-DriveDataObject -DriveLetter $letter -UNCPath $unc -Description $desc -ReconnectAtSignIn (-not [bool]$NoPersist)
-    }
-    $driveData | ConvertTo-Json | Set-Content -Encoding UTF8 $backupJsonPath
+    $drives | ConvertTo-Json | Set-Content -Encoding UTF8 $backupJsonPath
     Write-Host "Backup JSON saved to $backupJsonPath."
     if (!(Test-Path $backupJsonPath)) {
         Write-Error "Backup JSON file $backupJsonPath not found."
         exit 1
     }
-    $driveData = Get-Content $backupJsonPath | ConvertFrom-Json
-    $BackupScriptContent = Generate-BackupScript -DriveData $driveData
+    $BackupScriptContent = Generate-BackupScript -DriveData $drives
     $BackupScriptContent | Set-Content -Encoding UTF8 $backupScriptPath
     Write-Host "Restore script saved to $backupScriptPath."
     if ($Clear) { Remove-AllMappedDrives; Write-Host 'All mapped drives cleared after backup.' }
