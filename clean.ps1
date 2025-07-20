@@ -7,6 +7,143 @@ param (
     [switch]$Help
 )
 
+$possibleActions = @{
+    "clean" = @{
+        "pip" = @{
+            Description = "Clean pip cache and packages"
+            Code      = { Backup-Pip; Clear-Pip }
+        }
+        "npm" = @{
+            Description = "Clean npm cache and node_modules"
+            Code      = { Backup-Npm; Clear-Npm }
+        }
+        "windows" = @{
+            Description = "Clean Windows temp files, caches, and system folders"
+            Code      = { Clear-Windows }
+        }
+        "eventlogs" = @{
+            Description = "Clear Windows event logs"
+            Code      = { Clear-WindowsEventlogs }
+        }
+        "netdrives" = @{
+            Description = "Remove mapped network drives"
+            Code      = { Remove-MappedDrives }
+        }
+    }
+    "meta" = @{
+        "all" = @{
+            Description = "Run all cleaning actions"
+            Actions = @()  # placeholder, set below
+        }
+        "default" = @{
+            Description = "Default cctions"
+            Actions = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
+        }
+    }
+    "special" = @{
+        "toast" = @{
+            Description = "Show a toast notification"
+            Code      = {
+                try {
+                    # Try to use BurntToast module if available
+                    if (Get-Module -ListAvailable -Name BurntToast) {
+                        Import-Module BurntToast -ErrorAction SilentlyContinue
+                        New-BurntToastNotification -Text "Clean.ps1", "This is a toast notification from clean.ps1!"
+                    } else {
+                        # Fallback: Use Windows 10+ Toast via COM (if available)
+                        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                        $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+                        $textNodes = $template.GetElementsByTagName("text")
+                        $textNodes.Item(0).AppendChild($template.CreateTextNode("Clean.ps1")) | Out-Null
+                        $textNodes.Item(1).AppendChild($template.CreateTextNode("This is a toast notification from clean.ps1!")) | Out-Null
+                        $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
+                        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell")
+                        $notifier.Show($toast)
+                    }
+                } catch {
+                    Write-Host "[SPECIAL] Toast notification (no compatible method found)" -ForegroundColor Magenta
+                }
+            }
+        }
+        "shutdown" = @{
+            Description = "Shutdown the computer"
+            Code      = {
+                try {
+                    Stop-Computer -Force
+                } catch {
+                    Write-Host "[SPECIAL] Failed to shutdown: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "logout" = @{
+            Description = "Log out the current user"
+            Code      = {
+                try {
+                    shutdown.exe /l
+                } catch {
+                    Write-Host "[SPECIAL] Failed to log out: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "sleep" = @{
+            Description = "Put the computer to sleep"
+            Code      = {
+                try {
+                    # This works on most Windows systems
+                    rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+                } catch {
+                    Write-Host "[SPECIAL] Failed to sleep: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "lock" = @{
+            Description = "Lock the workstation"
+            Code      = {
+                try {
+                    rundll32.exe user32.dll,LockWorkStation
+                } catch {
+                    Write-Host "[SPECIAL] Failed to lock: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "reboot" = @{
+            Description = "Reboot the computer"
+            Code      = {
+                try {
+                    Restart-Computer -Force
+                } catch {
+                    Write-Host "[SPECIAL] Failed to reboot: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "hibernate" = @{
+            Description = "Hibernate the computer"
+            Code      = {
+                try {
+                    rundll32.exe powrprof.dll,SetSuspendState Hibernate
+                } catch {
+                    Write-Host "[SPECIAL] Failed to hibernate: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "pause" = @{
+            Description = "Pause script execution until user input"
+            Code      = { Pause "Paused by user request. Press any key to continue..." }
+        }
+        "elevate" = @{
+            Description = "Rerun the script as administrator (UAC prompt)"
+            Code      = { Elevate-Self }
+        }
+        "exit" = @{
+            Description = "Exit Script"
+            Code      = { exit }
+        }
+    }
+}
+# Now set the 'all' actions after definition
+$possibleActions["meta"]["all"].Actions = $possibleActions["clean"].Keys
+$possibleActions["meta"]["default"].Description = ($possibleActions["meta"]["default"].Actions -join ", ")
+
 # region FUNCTIONS
 function Show-Help {
     $scriptFileName = Split-Path -Leaf $MyInvocation.MyCommand.Path
@@ -227,105 +364,23 @@ function Clear-WindowsEventlogs {
 # endregion FUNCTIONS
 # region LOGIC
 
-# Define possible actions as a wrapper dictionary with string keys for 'clean', 'meta', and 'special' categories
-$possibleActions = @{
-    "clean" = @{
-        "pip" = @{
-            Description = "Clean pip cache and packages"
-            Code      = { Backup-Pip; Clear-Pip }
-        }
-        "npm" = @{
-            Description = "Clean npm cache and node_modules"
-            Code      = { Backup-Npm; Clear-Npm }
-        }
-        "windows" = @{
-            Description = "Clean Windows temp files, caches, and system folders"
-            Code      = { Clear-Windows }
-        }
-        "eventlogs" = @{
-            Description = "Clear Windows event logs"
-            Code      = { Clear-WindowsEventlogs }
-        }
-        "netdrives" = @{
-            Description = "Remove mapped network drives"
-            Code      = { Remove-MappedDrives }
-        }
-    }
-    "meta" = @{
-        "all" = @{
-            Description = "Run all cleaning actions"
-            Actions = @($possibleActions["clean"].Keys)
-        }
-        "default" = @{
-            Description = "Run the default cleaning actions (pip, npm, windows, eventlogs)"
-            Actions = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
-        }
-    }
-    "special" = @{
-        "toast" = @{
-            Description = "Show a toast notification"
-            Code      = { Write-Host "[SPECIAL] Toast notification (implement as needed)" -ForegroundColor Magenta }
-        }
-        "shutdown" = @{
-            Description = "Shutdown the computer"
-            Code      = { Write-Host "[SPECIAL] Shutting down... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "logout" = @{
-            Description = "Log out the current user"
-            Code      = { Write-Host "[SPECIAL] Logging out... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "sleep" = @{
-            Description = "Put the computer to sleep"
-            Code      = { Write-Host "[SPECIAL] Sleeping... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "lock" = @{
-            Description = "Lock the workstation"
-            Code      = { Write-Host "[SPECIAL] Locking workstation... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "reboot" = @{
-            Description = "Reboot the computer"
-            Code      = { Write-Host "[SPECIAL] Rebooting... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "hibernate" = @{
-            Description = "Hibernate the computer"
-            Code      = { Write-Host "[SPECIAL] Hibernating... (implement as needed)" -ForegroundColor Magenta }
-        }
-        "pause" = @{
-            Description = "Pause script execution until user input"
-            Code      = { Pause "Paused by user request. Press any key to continue..." }
-        }
-        "elevate" = @{
-            Description = "Rerun the script as administrator (UAC prompt)"
-            Code      = { Elevate-Self }
-        }
-    }
-}
-
-# Build the list of all valid actions (case-insensitive)
 $allValidActions = @()
 foreach ($cat in $possibleActions.Keys) {
     $allValidActions += $possibleActions[$cat].Keys
 }
 $allValidActions = $allValidActions | Select-Object -Unique
-
-# Validate actions (case-insensitive)
 $invalidActions = $Actions | Where-Object { $_.ToLower() -notin ($allValidActions | ForEach-Object { $_.ToLower() }) }
-if ($invalidActions.Count -gt 0) {
-    Write-Host "Invalid action(s): $($invalidActions -join ', ')" -ForegroundColor Red
+if ($invalidActions | Select-Object -Unique | Where-Object { $_ }) {
+    Write-Host "Invalid action(s): $(( $invalidActions | Select-Object -Unique | Where-Object { $_ } ) -join ', ')" -ForegroundColor Red
     Write-Host "Valid actions are: $($allValidActions -join ', ')" -ForegroundColor Yellow
     exit 1
 }
 
-if (-Not $SkipUAC) { Elevate-Self }
-
-# Expand "all" and "default" in-place, preserving other actions
 $actionsToRun = @()
 foreach ($action in $Actions) {
     switch ($action) {
         "all" {
-            foreach ($cat in $possibleActions.Keys) {
-                $actionsToRun += $possibleActions[$cat].Keys
-            }
+            $actionsToRun += $possibleActions["clean"].Keys
         }
         "default" {
             if ($possibleActions.ContainsKey("meta") -and $possibleActions["meta"].ContainsKey("default")) {
