@@ -1,6 +1,6 @@
 param (
     [Parameter(Position=0, Mandatory=$false)]
-    [ValidateSet("pip", "npm", "windows", "eventlogs", "netdrives", "default", "all")]
+    # [ValidateSet(...)] removed for manual validation
     [string[]]$Actions = @(),
     [switch]$SkipUAC = $false,
     [string[]]$WhitelistedUsers = @("Bluscream"),
@@ -10,15 +10,17 @@ param (
 # region FUNCTIONS
 function Show-Help {
     $scriptFileName = Split-Path -Leaf $MyInvocation.MyCommand.Path
-    $actionDescriptions = $possibleActions.GetEnumerator() | ForEach-Object {
-        "  $($_.Key)  -  $($_.Value.Description)"
+    $actionDescriptions = $possibleActions.Keys | ForEach-Object {
+        $category = $_
+        $possibleActions[$category].GetEnumerator() | ForEach-Object {
+            "  $($_.Key)  -  $($_.Value.Description)"
+        }
     } | Out-String
     Write-Host @"
 Usage: .\$scriptFileName -Actions <action1,action2,...> [-default] [-skipUAC] [-WhiteListedUsers ...]
 
 -Actions:         One or more of:
 $actionDescriptions
--default:        Run the default cleaning actions (pip, npm, windows, eventlogs)
 -skipUAC:        Skip elevation prompt
 -WhiteListedUsers: Users whose Downloads folder will not be cleaned
 -Help:           Show this help message
@@ -225,94 +227,162 @@ function Clear-WindowsEventlogs {
 # endregion FUNCTIONS
 # region LOGIC
 
+# Define possible actions as a wrapper dictionary with string keys for 'clean', 'meta', and 'special' categories
 $possibleActions = @{
-    "pip" = @{
-        Description = "Clean pip cache and packages"
-        Action      = { Backup-Pip; Clear-Pip }
+    "clean" = @{
+        "pip" = @{
+            Description = "Clean pip cache and packages"
+            Code      = { Backup-Pip; Clear-Pip }
+        }
+        "npm" = @{
+            Description = "Clean npm cache and node_modules"
+            Code      = { Backup-Npm; Clear-Npm }
+        }
+        "windows" = @{
+            Description = "Clean Windows temp files, caches, and system folders"
+            Code      = { Clear-Windows }
+        }
+        "eventlogs" = @{
+            Description = "Clear Windows event logs"
+            Code      = { Clear-WindowsEventlogs }
+        }
+        "netdrives" = @{
+            Description = "Remove mapped network drives"
+            Code      = { Remove-MappedDrives }
+        }
     }
-    "npm" = @{
-        Description = "Clean npm cache and node_modules"
-        Action      = { Backup-Npm; Clear-Npm }
+    "meta" = @{
+        "all" = @{
+            Description = "Run all cleaning actions"
+            Actions = @($possibleActions["clean"].Keys)
+        }
+        "default" = @{
+            Description = "Run the default cleaning actions (pip, npm, windows, eventlogs)"
+            Actions = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
+        }
     }
-    "windows" = @{
-        Description = "Clean Windows temp files, caches, and system folders"
-        Action      = { Clear-Windows }
-    }
-    "eventlogs" = @{
-        Description = "Clear Windows event logs"
-        Action      = { Clear-WindowsEventlogs }
-    }
-    "netdrives" = @{
-        Description = "Remove mapped network drives"
-        Action      = { Remove-MappedDrives }
-    }
-    "all" = @{
-        Description = "Run all cleaning actions"
-        Action      = { foreach ($key in $possibleActions.Keys) { if ($key -ne "all" -and $key -ne "default") { & $possibleActions[$key].Action } } }
-    }
-    "default" = @{
-        Description = "Run the default cleaning actions (pip, npm, windows, eventlogs)"
-        Action      = { foreach ($key in @("pip", "npm", "windows", "eventlogs")) { & $possibleActions[$key].Action } }
+    "special" = @{
+        "toast" = @{
+            Description = "Show a toast notification"
+            Code      = { Write-Host "[SPECIAL] Toast notification (implement as needed)" -ForegroundColor Magenta }
+        }
+        "shutdown" = @{
+            Description = "Shutdown the computer"
+            Code      = { Write-Host "[SPECIAL] Shutting down... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "logout" = @{
+            Description = "Log out the current user"
+            Code      = { Write-Host "[SPECIAL] Logging out... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "sleep" = @{
+            Description = "Put the computer to sleep"
+            Code      = { Write-Host "[SPECIAL] Sleeping... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "lock" = @{
+            Description = "Lock the workstation"
+            Code      = { Write-Host "[SPECIAL] Locking workstation... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "reboot" = @{
+            Description = "Reboot the computer"
+            Code      = { Write-Host "[SPECIAL] Rebooting... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "hibernate" = @{
+            Description = "Hibernate the computer"
+            Code      = { Write-Host "[SPECIAL] Hibernating... (implement as needed)" -ForegroundColor Magenta }
+        }
+        "pause" = @{
+            Description = "Pause script execution until user input"
+            Code      = { Pause "Paused by user request. Press any key to continue..." }
+        }
+        "elevate" = @{
+            Description = "Rerun the script as administrator (UAC prompt)"
+            Code      = { Elevate-Self }
+        }
     }
 }
 
-# Validate that the ValidateSet for -Actions matches the keys in $possibleActions
-$param = $MyInvocation.MyCommand.Parameters["Actions"]
-$validateSetValues = ($param.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] }).ValidValues
-$possibleActionKeys = $possibleActions.Keys
+# $param = $MyInvocation.MyCommand.Parameters["Actions"]
+# $validateSetValues = ($param.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] }).ValidValues
+# $possibleActionKeys = @($possibleActions["clean"].Keys + $possibleActions["meta"].Keys + $possibleActions["special"].Keys)
+# if (-not ((@($validateSetValues) | Sort-Object) -join ',') -eq ((@($possibleActionKeys) | Sort-Object) -join ',')) {
+#     Write-Error "Mismatch between Actions ValidateSet and possibleActions keys. Please ensure they match."
+#     Write-Host "possibleActions keys: $($possibleActionKeys -join ', ')"
+#     Write-Host "Actions ValidateSet: $(@($validateSetValues) -join ', ')"
+#     exit 1
+# }
 
-# (Optional: Remove this check entirely, or use this order-insensitive version:)
-if (-not ((@($validateSetValues) | Sort-Object) -join ',') -eq ((@($possibleActionKeys) | Sort-Object) -join ',')) {
-    Write-Error "Mismatch between Actions ValidateSet and possibleActions keys. Please ensure they match."
-    Write-Host "possibleActions keys: $($possibleActionKeys -join ', ')"
-    Write-Host "Actions ValidateSet: $(@($validateSetValues) -join ', ')"
-    exit 1
-}
-
-# Show help if requested or no action/default specified
-if ($Help -or ($Actions.Count -eq 0 -and -not $Default)) {
+if ($Help -or ($Actions.Count -eq 0)) {
     Show-Help
 }
 
-# Elevate if needed
-if (-Not $SkipUAC) { Elevate-Self }
-
-# Determine which actions to run
-$actionsToRun = @()
-if ($Actions -contains "all") {
-    $actionsToRun = $possibleActions.Keys
-} elseif ($Default) {
-    $actionsToRun = @("pip", "npm", "windows", "eventlogs")
-} else {
-    $actionsToRun = $Actions
+# MAIN_LOGIC: Validate actions manually
+$allValidActions = @()
+foreach ($cat in $possibleActions.Keys) {
+    $allValidActions += $possibleActions[$cat].Keys
+}
+$invalidActions = $Actions | Where-Object { $_ -notin $allValidActions }
+if ($invalidActions.Count -gt 0) {
+    Write-Host "Invalid action(s): $($invalidActions -join ', ')" -ForegroundColor Red
+    Write-Host "Valid actions are: $($allValidActions -join ', ')" -ForegroundColor Yellow
+    exit 1
 }
 
-# Remove "all" and "default" from actionsToRun if present
-$actionsToRun = $actionsToRun | Where-Object { $_ -ne "all" -and $_ -ne "default" }
+if (-Not $SkipUAC) { Elevate-Self }
+
+# Expand "all" and "default" in-place, preserving other actions
+$actionsToRun = @()
+foreach ($action in $Actions) {
+    switch ($action) {
+        "all" {
+            foreach ($cat in $possibleActions.Keys) {
+                $actionsToRun += $possibleActions[$cat].Keys
+            }
+        }
+        "default" {
+            if ($possibleActions.ContainsKey("meta") -and $possibleActions["meta"].ContainsKey("default")) {
+                $actionsToRun += $possibleActions["meta"]["default"].Actions
+            }
+        }
+        default {
+            $actionsToRun += $action
+        }
+    }
+}
+
+# Remove duplicates and preserve order
 $actionsToRun = $actionsToRun | Select-Object -Unique
 
 Write-Host "The following actions will be run:" -ForegroundColor Cyan
 $actionTable = @()
 $stepNum = 1
 foreach ($act in $actionsToRun) {
-    if ($possibleActions.ContainsKey($act)) {
-        $desc = $possibleActions[$act].Description
-        $actionTable += [PSCustomObject]@{
-            Step         = $stepNum
-            Action       = $act
-            Description  = $desc
+    foreach ($category in $possibleActions.Keys) {
+        if ($possibleActions[$category].ContainsKey($act)) {
+            $desc = $possibleActions[$category][$act].Description
+            $actionTable += [PSCustomObject]@{
+                Step = $stepNum
+                Code = $act
+                Description = $desc
+            }
+            $stepNum++
+            break
         }
-        $stepNum++
     }
 }
 $actionTable | Format-Table -AutoSize
 
-exit
-
 # Run selected actions
 foreach ($act in $actionsToRun) {
-    if ($possibleActions.ContainsKey($act)) {
-        & $possibleActions[$act].Action
+    $found = $false
+    foreach ($category in $possibleActions.Keys) {
+        if ($possibleActions[$category].ContainsKey($act)) {
+            & $possibleActions[$category][$act].Code
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) {
+        Write-Host "Unknown action $act" -ForegroundColor Red
     }
 }
 
