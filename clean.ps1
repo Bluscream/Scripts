@@ -301,26 +301,15 @@ $possibleActions = @{
     }
 }
 
-# $param = $MyInvocation.MyCommand.Parameters["Actions"]
-# $validateSetValues = ($param.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] }).ValidValues
-# $possibleActionKeys = @($possibleActions["clean"].Keys + $possibleActions["meta"].Keys + $possibleActions["special"].Keys)
-# if (-not ((@($validateSetValues) | Sort-Object) -join ',') -eq ((@($possibleActionKeys) | Sort-Object) -join ',')) {
-#     Write-Error "Mismatch between Actions ValidateSet and possibleActions keys. Please ensure they match."
-#     Write-Host "possibleActions keys: $($possibleActionKeys -join ', ')"
-#     Write-Host "Actions ValidateSet: $(@($validateSetValues) -join ', ')"
-#     exit 1
-# }
-
-if ($Help -or ($Actions.Count -eq 0)) {
-    Show-Help
-}
-
-# MAIN_LOGIC: Validate actions manually
+# Build the list of all valid actions (case-insensitive)
 $allValidActions = @()
 foreach ($cat in $possibleActions.Keys) {
     $allValidActions += $possibleActions[$cat].Keys
 }
-$invalidActions = $Actions | Where-Object { $_ -notin $allValidActions }
+$allValidActions = $allValidActions | Select-Object -Unique
+
+# Validate actions (case-insensitive)
+$invalidActions = $Actions | Where-Object { $_.ToLower() -notin ($allValidActions | ForEach-Object { $_.ToLower() }) }
 if ($invalidActions.Count -gt 0) {
     Write-Host "Invalid action(s): $($invalidActions -join ', ')" -ForegroundColor Red
     Write-Host "Valid actions are: $($allValidActions -join ', ')" -ForegroundColor Yellow
