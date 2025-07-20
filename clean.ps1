@@ -4,6 +4,7 @@ param (
     [string[]]$Actions = @(),
     [switch]$SkipUAC = $false,
     [string[]]$WhitelistedUsers = @("Bluscream"),
+    [string]$Message = "Message",
     [switch]$Help
 )
 
@@ -11,23 +12,23 @@ $possibleActions = @{
     "clean" = @{
         "pip" = @{
             Description = "Clean pip cache and packages"
-            Code      = { Backup-Pip; Clear-Pip }
+            Code = { Backup-Pip; Clear-Pip }
         }
         "npm" = @{
             Description = "Clean npm cache and node_modules"
-            Code      = { Backup-Npm; Clear-Npm }
+            Code = { Backup-Npm; Clear-Npm }
         }
         "windows" = @{
             Description = "Clean Windows temp files, caches, and system folders"
-            Code      = { Clear-Windows }
+            Code = { Clear-Windows }
         }
         "eventlogs" = @{
             Description = "Clear Windows event logs"
-            Code      = { Clear-WindowsEventlogs }
+            Code = { Clear-WindowsEventlogs }
         }
         "netdrives" = @{
             Description = "Remove mapped network drives"
-            Code      = { Remove-MappedDrives }
+            Code = { Remove-MappedDrives }
         }
     }
     "meta" = @{
@@ -43,19 +44,17 @@ $possibleActions = @{
     "special" = @{
         "toast" = @{
             Description = "Show a toast notification"
-            Code      = {
+            Code = {
                 try {
-                    # Try to use BurntToast module if available
                     if (Get-Module -ListAvailable -Name BurntToast) {
                         Import-Module BurntToast -ErrorAction SilentlyContinue
-                        New-BurntToastNotification -Text "Clean.ps1", "This is a toast notification from clean.ps1!"
+                        New-BurntToastNotification -Text "Clean.ps1", $Message
                     } else {
-                        # Fallback: Use Windows 10+ Toast via COM (if available)
                         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
                         $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
                         $textNodes = $template.GetElementsByTagName("text")
                         $textNodes.Item(0).AppendChild($template.CreateTextNode("Clean.ps1")) | Out-Null
-                        $textNodes.Item(1).AppendChild($template.CreateTextNode("This is a toast notification from clean.ps1!")) | Out-Null
+                        $textNodes.Item(1).AppendChild($template.CreateTextNode($Message)) | Out-Null
                         $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
                         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell")
                         $notifier.Show($toast)
@@ -67,7 +66,7 @@ $possibleActions = @{
         }
         "shutdown" = @{
             Description = "Shutdown the computer"
-            Code      = {
+            Code = {
                 try {
                     Stop-Computer -Force
                 } catch {
@@ -77,7 +76,7 @@ $possibleActions = @{
         }
         "logout" = @{
             Description = "Log out the current user"
-            Code      = {
+            Code = {
                 try {
                     shutdown.exe /l
                 } catch {
@@ -87,9 +86,8 @@ $possibleActions = @{
         }
         "sleep" = @{
             Description = "Put the computer to sleep"
-            Code      = {
+            Code = {
                 try {
-                    # This works on most Windows systems
                     rundll32.exe powrprof.dll,SetSuspendState 0,1,0
                 } catch {
                     Write-Host "[SPECIAL] Failed to sleep: $($_.Exception.Message)" -ForegroundColor Red
@@ -98,7 +96,7 @@ $possibleActions = @{
         }
         "lock" = @{
             Description = "Lock the workstation"
-            Code      = {
+            Code = {
                 try {
                     rundll32.exe user32.dll,LockWorkStation
                 } catch {
@@ -108,7 +106,7 @@ $possibleActions = @{
         }
         "reboot" = @{
             Description = "Reboot the computer"
-            Code      = {
+            Code = {
                 try {
                     Restart-Computer -Force
                 } catch {
@@ -118,7 +116,7 @@ $possibleActions = @{
         }
         "hibernate" = @{
             Description = "Hibernate the computer"
-            Code      = {
+            Code = {
                 try {
                     rundll32.exe powrprof.dll,SetSuspendState Hibernate
                 } catch {
@@ -128,15 +126,48 @@ $possibleActions = @{
         }
         "pause" = @{
             Description = "Pause script execution until user input"
-            Code      = { Pause "Paused by user request. Press any key to continue..." }
+            Code = { Pause "Paused by user request. Press any key to continue..." }
         }
         "elevate" = @{
             Description = "Rerun the script as administrator (UAC prompt)"
-            Code      = { Elevate-Self }
+            Code = { Elevate-Self }
         }
         "exit" = @{
             Description = "Exit Script"
-            Code      = { exit }
+            Code = { exit }
+        }
+        "powersaver" = @{
+            Description = "Set Windows power plan to Power Saver"
+            Code      = {
+                try {
+                    powercfg.exe /s a1841308-3541-4fab-bc81-f71556f20b4a
+                    Write-Host "Power plan set to Power Saver"
+                } catch {
+                    Write-Host "[SPECIAL] Failed to set Power Saver power plan $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "balanced" = @{
+            Description = "Set Windows power plan to Balanced"
+            Code      = {
+                try {
+                    powercfg.exe /s 381b4222-f694-41f0-9685-ff5bb260df2e
+                    Write-Host "Power plan set to Balanced"
+                } catch {
+                    Write-Host "[SPECIAL] Failed to set Balanced power plan $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        "highperformance" = @{
+            Description = "Set Windows power plan to High Performance"
+            Code      = {
+                try {
+                    powercfg.exe /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+                    Write-Host "Power plan set to High Performance"
+                } catch {
+                    Write-Host "[SPECIAL] Failed to set High Performance power plan $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
         }
     }
 }
