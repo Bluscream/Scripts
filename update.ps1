@@ -137,11 +137,21 @@ function Update-Npm {
     try {
         Set-Title 'Updating npm'
         # Get list of outdated packages
-        $outdatedPackages = & npm outdated --json | ConvertFrom-Json
-
-        foreach ($package in $outdatedPackages.data) {
-            # Update each package individually
-            & npm install $($package.name)@latest
+        $outdatedRaw = & npm outdated --json 2>$null
+        $outdatedPackages = $null
+        if ($outdatedRaw -and $outdatedRaw.Trim().StartsWith('{')) {
+            try {
+                $outdatedPackages = $outdatedRaw | ConvertFrom-Json
+            } catch {
+                Write-Host "npm outdated output is not valid JSON. Skipping npm update."
+                return $true
+            }
+        } else {
+            Write-Host "No outdated npm packages found or output is not JSON."
+            return $true
+        }
+        foreach ($packageName in $outdatedPackages.PSObject.Properties.Name) {
+            & npm install $packageName@latest
         }
         return $true
     }
@@ -212,9 +222,16 @@ function Update-Windows {
         Get-Command -module PSWindowsUpdate  
         # Get-WindowsUpdate
         Get-WUInstall -IgnoreUserInput -Acceptall -Download -Install -Verbose
-        Add-WUServiceManager -MicrosoftUpdate -Confirm:$false # -ServiceID "7971f918-a847-4430-9279-4a52d1efe18d"
-        # Add-WUServiceManager -WindowsUpdate -Confirm:$false # -ServiceID "9482f4b4-e343-43b6-b170-9a65bc822c77"
-        Add-WUServiceManager -ServiceID "9482f4b4-e343-43b6-b170-9a65bc822c77" -Confirm:$false
+        try {
+            Add-WUServiceManager -MicrosoftUpdate -Confirm:$false
+        } catch {
+            Write-Host "Add-WUServiceManager -MicrosoftUpdate failed or already present."
+        }
+        try {
+            Add-WUServiceManager -ServiceID "9482f4b4-e343-43b6-b170-9a65bc822c77" -Confirm:$false
+        } catch {
+            Write-Host "Add-WUServiceManager -ServiceID failed or already present."
+        }
         Get-WindowsUpdate -Install -MicrosoftUpdate -AcceptAll -IgnoreReboot
         return $true
     }
@@ -222,6 +239,14 @@ function Update-Windows {
         Write-Error $_.Exception.Message
         return $false
     }
+}
+
+# Only call Update-Pip for python executables that exist
+function Test-CommandExists {
+    param(
+        [string]$Command
+    )
+    $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
 }
 
 if ($allByDefault -and $MyInvocation.BoundParameters.Count -eq 0) {
@@ -248,9 +273,14 @@ if ($all -or $default -or $windows) { $windows_success = Update-Windows }
 if ($all -or $default -or $npm) { $npm_success = Update-Npm }
 
 if ($all -or $default -or $pip) {
-    $pip_success = Update-Pip "python"
-    $pip_success = Update-Pip "python2"
-    $pip_success = Update-Pip "python3"
+    $pip_success = $true
+    foreach ($py in @("python", "python2", "python3")) {
+        if (Test-CommandExists $py) {
+            $pip_success = $pip_success -and (Update-Pip $py)
+        } else {
+            Write-Host "$py not found, skipping pip update for $py."
+        }
+    }
 }
 
 if ($all -or $default -or $winget) { $winget_success = Update-Winget }

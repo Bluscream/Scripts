@@ -6,7 +6,7 @@ param (
     [switch]$all,
     [switch]$default,
     [switch]$skipUAC = $false,
-    [swtich]$mappedDrives,
+    [switch]$mappedDrives,
     [string[]]$WhiteListedUsers = @("Bluscream"),
     [switch]$help
 )
