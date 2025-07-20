@@ -23,7 +23,10 @@ param(
     [switch]$NoPersist,
 
     [Parameter(Mandatory=$false)]
-    [switch]$Test
+    [switch]$Test,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipUAC
 )
 
 # region FUNCTIONS
@@ -42,6 +45,17 @@ function To-ProperCase {
             }
         }) -join ' '
     }
+}
+function Is-RunAsAdmin {
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)
+    $is6k = [int](Get-CimInstance -Class Win32_OperatingSystem | Select-Object -ExpandProperty BuildNumber) -ge 6000
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator -and $is6k)
+}
+function Elevate-Self {
+    $CommandLine = "-File `"" + $MyInvocation.MyCommand.Path + "`" " + $MyInvocation.UnboundArguments
+    Start-Process -FilePath pwsh.exe -Verb Runas -ArgumentList $CommandLine
+    exit
 }
 function New-DriveDataObject {
     param(
@@ -251,26 +265,20 @@ function Generate-RestoreScript {
     $BackupScriptContent = @()
     $BackupScriptContent += '# This script restores mapped network drives.'
     $BackupScriptContent += ''
-    $BackupScriptContent += 'function Is-RunAsAdmin {'
-    $BackupScriptContent += '    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()'
-    $BackupScriptContent += '    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)'
-    $BackupScriptContent += '    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)'
-    $BackupScriptContent += '}'
-    $BackupScriptContent += ''
-    $BackupScriptContent += 'function Elevate-Self {'
-    $BackupScriptContent += '    $myInvocation = $MyInvocation'
-    $BackupScriptContent += '    $psi = New-Object System.Diagnostics.ProcessStartInfo'
-    $BackupScriptContent += '    $psi.FileName = (Get-Process -Id $PID).Path'
-    $BackupScriptContent += '    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$($myInvocation.MyCommand.Definition)"""'
-    $BackupScriptContent += '    $psi.Verb = "runas"'
-    $BackupScriptContent += '    try {'
-    $BackupScriptContent += '        [System.Diagnostics.Process]::Start($psi) | Out-Null'
-    $BackupScriptContent += '        exit'
-    $BackupScriptContent += '    } catch {'
-    $BackupScriptContent += '        Write-Warning "Elevation cancelled or failed."'
-    $BackupScriptContent += '        exit 1'
-    $BackupScriptContent += '    }'
-    $BackupScriptContent += '}'
+    # Use reflection to get the source code of Is-RunAsAdmin and Elevate-Self and add to $BackupScriptContent
+    $funcNames = @('Is-RunAsAdmin', 'Elevate-Self')
+    foreach ($func in $funcNames) {
+        $funcObj = Get-Command $func -CommandType Function
+        if ($funcObj) {
+            $funcSource = ($funcObj.ScriptBlock.ToString() -split "`r?`n")
+            $BackupScriptContent += ''
+            $BackupScriptContent += "function $func {"
+            foreach ($line in $funcSource[1..($funcSource.Count-2)]) {
+                $BackupScriptContent += $line
+            }
+            $BackupScriptContent += '}'
+        }
+    }
     $BackupScriptContent += ''
     $BackupScriptContent += 'if (-not (Is-RunAsAdmin)) {'
     $BackupScriptContent += '    Write-Host "Script is not running as administrator. Attempting to relaunch with elevation..."'
@@ -369,6 +377,12 @@ if ($Backup) {
     $BackupScriptContent | Set-Content -Encoding UTF8 $backupScriptPath
     Write-Host "Restore script saved to $backupScriptPath."
     if ($Clear) { Remove-AllMappedDrives; Write-Host 'All mapped drives cleared after backup.' }
+}
+
+if (-not $SkipUAC -and -not (Is-RunAsAdmin)) {
+    Write-Host "Script is not running as administrator. Attempting to relaunch with elevation..."
+    Elevate-Self
+    exit
 }
 
 if ($Clear -and -not ($Backup -or $Restore)) {

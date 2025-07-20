@@ -6,6 +6,8 @@ param (
     [switch]$all,
     [switch]$default,
     [switch]$skipUAC = $false,
+    [swtich]$mappedDrives,
+    [string[]]$WhiteListedUsers = @("Bluscream"),
     [switch]$help
 )
 
@@ -132,6 +134,21 @@ function Clear-Npm {
     }
 }
 
+function Remove-MappedDrives {
+    Set-Title "Removing mapped network drives"
+    $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' }
+    foreach ($drive in $drives) {
+        $letter = $drive.Name
+        try {
+            Remove-PSDrive -Name $letter -Force -ErrorAction Stop
+            net use "$($letter):" /delete /y | Out-Null
+            Write-Host "Removed mapped drive $letter."
+        } catch {
+            Write-Warning "Failed to remove mapped drive $letter. $_"
+        }
+    }
+}
+
 function Clear-Windows {
     Set-Title "Cleaning Windows"
 
@@ -144,7 +161,7 @@ function Clear-Windows {
     $users = Get-ChildItem -Path $env:SystemDrive\Users -Directory
     foreach ($user in $users) {
         $tempDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Temp'
-        Set-Title "Cleaning Windows ($tempDir)"
+        Set-Title "Cleaning %temp% ($tempDir)"
         Remove-Item -Path $tempDir\* -Recurse -Force
         # Clear CrashDumps folder for all users
         $crashDumpsDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\CrashDumps'
@@ -171,6 +188,13 @@ function Clear-Windows {
         if (Test-Path $webCacheDir) {
             Set-Title "Cleaning WebCache ($webCacheDir)"
             Remove-Item -Path "$webCacheDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($WhiteListedUsers -notcontains $user.Name) {
+            $downloadsDir = Join-Path -Path $user.FullName -ChildPath 'Downloads'
+            if (Test-Path $downloadsDir) {
+                Set-Title "Cleaning Downloads ($downloadsDir)"
+                Remove-Item -Path "$downloadsDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -222,6 +246,9 @@ elseif ($help -or $MyInvocation.BoundParameters.Count -eq 0) {
 }
 
 if (-Not $skipUAC) { Elevate-Script }
+if ($all -or $mappedDrives) {
+    Remove-MappedDrives
+}
 if ($all -or $default -or $npm) {
     Backup-Npm
     Clear-Npm
