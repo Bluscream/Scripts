@@ -339,7 +339,6 @@ function Clear-Downloads {
         if ($WhitelistedUsers -notcontains $user.Name) {
             $downloadsDir = Join-Path -Path $user.FullName -ChildPath 'Downloads'
             if (Test-Path $downloadsDir) {
-                # Move all files and folders in Downloads to Recycle Bin
                 $items = Get-ChildItem -Path $downloadsDir -Force
                 foreach ($item in $items) {
                     try {
