@@ -333,12 +333,26 @@ function Remove-MappedDrives {
 }
 function Clear-Downloads {
     Set-Title "Cleaning Downloads folders"
+    Add-Type -AssemblyName Microsoft.VisualBasic
     $users = Get-ChildItem -Path $env:SystemDrive\Users -Directory
     foreach ($user in $users) {
         if ($WhitelistedUsers -notcontains $user.Name) {
             $downloadsDir = Join-Path -Path $user.FullName -ChildPath 'Downloads'
             if (Test-Path $downloadsDir) {
-                Clear-Directory -Path $downloadsDir
+                # Move all files and folders in Downloads to Recycle Bin
+                $items = Get-ChildItem -Path $downloadsDir -Force
+                foreach ($item in $items) {
+                    try {
+                        if ($item.PSIsContainer) {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+                        } else {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+                        }
+                        Write-Host "Moved to Recycle Bin: $($item.FullName)"
+                    } catch {
+                        Write-Host "Failed to move to Recycle Bin: $($item.FullName) - $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
             }
         }
     }
