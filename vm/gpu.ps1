@@ -5,8 +5,6 @@ function Is-Admin {
     $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-
-
 function Copy-GPUDriverFiles {
     param(
         [string]$vm

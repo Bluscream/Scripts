@@ -45,7 +45,49 @@ function Send-HassEvent {
         throw
     }
 }
+enum WindowAction {
+    Minimize
+    Hide
+    Maximize
+}
+function Show-Window {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [WindowAction]$Action
+    )
+
+    # Get the current process main window handle
+    $hwnd = (Get-Process -Id $PID).MainWindowHandle
+
+    if (-not $hwnd -or $hwnd -eq 0) {
+        Write-Error "No main window handle found for this process."
+        return
+    }
+
+    # Define Win32 API functions
+    $signature = @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+
+    Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue
+
+    # Map enum to ShowWindow command
+    switch ($Action) {
+        'Minimize' { $cmd = 6 } # SW_MINIMIZE
+        'Hide'     { $cmd = 0 } # SW_HIDE
+        'Maximize' { $cmd = 3 } # SW_MAXIMIZE
+        default    { $cmd = 5 } # SW_SHOW
+    }
+
+    [Win32]::ShowWindow($hwnd, $cmd) | Out-Null
+}
+
+Show-Window -Action Hide
 
 Send-HassEvent -Message $Message
-
-Read-Host
