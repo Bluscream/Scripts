@@ -30,6 +30,10 @@ $possibleActions = @{
             Description = "Remove mapped network drives"
             Code = { Remove-MappedDrives }
         }
+        "downloads" = @{
+            Description = "Clean Downloads folders for all users except whitelisted ones"
+            Code = { Clear-Downloads }
+        }
     }
     "meta" = @{
         "all" = @{
@@ -327,6 +331,18 @@ function Remove-MappedDrives {
         }
     }
 }
+function Clear-Downloads {
+    Set-Title "Cleaning Downloads folders"
+    $users = Get-ChildItem -Path $env:SystemDrive\Users -Directory
+    foreach ($user in $users) {
+        if ($WhitelistedUsers -notcontains $user.Name) {
+            $downloadsDir = Join-Path -Path $user.FullName -ChildPath 'Downloads'
+            if (Test-Path $downloadsDir) {
+                Clear-Directory -Path $downloadsDir
+            }
+        }
+    }
+}
 function Clear-Windows {
     Set-Title "Cleaning Windows"
 
@@ -354,12 +370,7 @@ function Clear-Windows {
             $nvidiaPath = Join-Path -Path $user.FullName -ChildPath "AppData\Local\NVIDIA\$cacheFolder"
             Clear-Directory -Path $nvidiaPath
         }
-        if ($WhitelistedUsers -notcontains $user.Name) {
-            $downloadsDir = Join-Path -Path $user.FullName -ChildPath 'Downloads'
-            if (Test-Path $downloadsDir) {
-                Clear-Directory -Path $downloadsDir
-            }
-        }
+        # Downloads cleaning moved to Clear-Downloads
     }
     Clear-Directory -Path "$env:windir\Temp"
     Clear-Directory -Path "$env:windir\Prefetch"
