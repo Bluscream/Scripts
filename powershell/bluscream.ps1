@@ -204,8 +204,21 @@ function Set-PowerProfile {
     }
 }
 # endregion System Actions
+function Get-ProcessMemory {
+    param(
+        [Parameter(Mandatory=$true)]
+        [Alias("Name")]
+        [string]$ProcessName
+    )
+    $procs = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+    if ($procs) {
+        return ($procs | Measure-Object -Property WorkingSet64 -Sum).Sum
+    } else {
+        return 0
+    }
+}
 
 # Only export module members if running as a module (not dot-sourced as a script)
 if ($MyInvocation.ScriptName -and ($MyInvocation.ScriptName -like '*.psm1')) {
-    Export-ModuleMember -Function Elevate-Self,Set-Title,Pause,Quote,Clear-Directory,Show-Toast,Logout-CurrentUser,Sleep-Computer,Lock-Computer,Hibernate-Computer,Set-PowerProfile
+    Export-ModuleMember -Function Elevate-Self,Set-Title,Pause,Quote,Clear-Directory,Show-Toast,Logout-CurrentUser,Sleep-Computer,Lock-Computer,Hibernate-Computer,Set-PowerProfile,Get-ProcessMemory
 } 
