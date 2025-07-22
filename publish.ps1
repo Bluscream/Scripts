@@ -3,7 +3,8 @@ param(
     [string]$Csproj,
     [string]$Version,
     [switch]$Nuget,
-    [switch]$Github
+    [switch]$Github,
+    [string]$Arch
 )
 
 function Bump-Version {
@@ -72,6 +73,27 @@ foreach ($csproj in $csprojFiles) {
     [xml]$projectXml = Get-Content $csproj
     $projectAssemblyNameNode = $projectXml.Project.PropertyGroup | Where-Object { $_.AssemblyName } | Select-Object -First 1
     $projectVersionNode = $projectXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
+    $projectRIDNode = $projectXml.Project.PropertyGroup | Where-Object { $_.RuntimeIdentifier } | Select-Object -First 1
+    $projectRIDsNode = $projectXml.Project.PropertyGroup | Where-Object { $_.RuntimeIdentifiers } | Select-Object -First 1
+    $projectFrameworkNode = $projectXml.Project.PropertyGroup | Where-Object { $_.Framework } | Select-Object -First 1
+    $projectTargetFrameworkNode = $projectXml.Project.PropertyGroup | Where-Object { $_.TargetFramework } | Select-Object -First 1
+    $projectFramework = $projectTargetFrameworkNode.TargetFramework ?? $projectFrameworkNode.Framework;
+
+    # Determine architecture
+    if ($Arch) {
+        $arch = $Arch
+    } elseif ($projectRIDNode -and $projectRIDNode.RuntimeIdentifier) {
+        $arch = $projectRIDNode.RuntimeIdentifier
+    } elseif ($projectRIDsNode -and $projectRIDsNode.RuntimeIdentifiers) {
+        $arch = ($projectRIDsNode.RuntimeIdentifiers -split ';')[0]
+    } else {
+        $arch = 'win-x64'
+    }
+    Write-Host "Using architecture: $arch"
+
+    $outputFrameworkSuffix = ".$projectFramework.$arch.exe"
+    $outputSelfcontainedSuffix = ".standalone.$arch.exe"
+    $outputBinarySuffix = ".$arch"
 
     $outputType = $projectXml.Project.PropertyGroup | Where-Object { $_.OutputType } | Select-Object -First 1
     $outputIsExe = $outputType.OutputType -eq 'Exe'
@@ -99,35 +121,55 @@ foreach ($csproj in $csprojFiles) {
     dotnet clean
     if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
 
-    $outputFrameworkExe = $null;$outputStandaloneExe = $null
+    $outputFrameworkExe = $null;$outputStandaloneExe = $null;$outputBinPath = $null
     if ($outputIsExe) {
         Write-Host "Building EXE..."
         # Framework-dependent build
-        $ret1 = dotnet publish -c Release -r win-x64 --self-contained false
+        dotnet publish -c Release -r $arch --self-contained false
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE) $ret1" -ForegroundColor Red
+            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
         }
-        $outputFrameworkExe = Get-ChildItem -Path "bin/Release/net*/win-x64/publish/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+        $outputFrameworkExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+        $fwExeName = "$outputAssemblyName$outputFrameworkSuffix"
         if ($outputFrameworkExe) {
-            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir "$outputAssemblyName.framework.exe") -Force
+            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
+            Write-Host "Framework-dependent EXE built successfully: $fwExeName"
         }
 
         # Self-contained build
-        $ret2 = dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+        dotnet publish -c Release -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE) $ret2" -ForegroundColor Red
+            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
         }
-        $outputStandaloneExe = Get-ChildItem -Path "bin/Release/net*/win-x64/publish/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $outputStandaloneExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $scExeName = "$outputAssemblyName$outputSelfcontainedSuffix"
         if ($outputStandaloneExe) {
-            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir "$outputAssemblyName.standalone.exe") -Force
+            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
+            Write-Host "Self-contained EXE built successfully: $scExeName"
+        }
+        # For upload, always use the arch-suffixed names
+        if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
+            $outputBinPath = Join-Path $outputBinDir $fwExeName
+        } elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
+            $outputBinPath = Join-Path $outputBinDir $scExeName
         }
     } else {
         Write-Host "Building DLL..."
-        $ret = dotnet publish -c Release
-        Copy-Item "bin/Release/net*/win-x64/publish/$outputAssemblyName.dll" (Join-Path $outputBinDir "$outputAssemblyName.dll") -Force
-        Write-Host "DLL built successfully"
+        dotnet publish -c Release -r $arch 
+        $dllPath = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.$outputBinarySuffix" -Recurse | Select-Object -First 1
+        if ($dllPath) {
+            Copy-Item $dllPath.FullName (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix") -Force
+            Write-Host "DLL built successfully: $outputAssemblyName$outputBinarySuffix.dll"
+        } else {
+            Write-Host "DLL not found after build" -ForegroundColor Red
+        }
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during dotnet publish $($LASTEXITCODE) $ret" -ForegroundColor Red
+            Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+        }
+        # For upload, always use the arch-suffixed DLL name
+        $outputBinPath = $null
+        if (Test-Path (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix")) {
+            $outputBinPath = Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix"
         }
     }
 
@@ -187,16 +229,8 @@ TestResults/
     }
 
     if ($Github) {
-        $outputBinPath = Get-ChildItem -Path $outputBinDir -Include "$outputAssemblyName.dll", "$outputAssemblyName.exe", "$outputAssemblyName.framework.exe", "$outputAssemblyName.standalone.exe" -Recurse | Select-Object -First 1
-        $outputExeFramework = Join-Path $outputBinDir "$outputAssemblyName.framework.exe"
-        $outputExeStandalone = Join-Path $outputBinDir "$outputAssemblyName.standalone.exe"
-        $outputExeDefault = Join-Path $outputBinDir "$outputAssemblyName.exe"
-        $assets = @()
-        if ($outputBinPath) { $assets += $outputBinPath.FullName }
-        if (Test-Path $outputExeDefault) { $assets += $outputExeDefault }
-        if (Test-Path $outputExeFramework) { $assets += $outputExeFramework }
-        if (Test-Path $outputExeStandalone) { $assets += $outputExeStandalone }
-        if (-not $assets) {
+        $assets = @(Get-ChildItem -Path $outputBinDir -Filter *.exe -File) + @(Get-ChildItem -Path $outputBinDir -Filter *.dll -File)
+        if (-not $assets -or $assets.Count -eq 0) {
             Write-Error "No DLL or EXE found after build for $outputAssemblyName."
             Pop-Location
             exit 1
@@ -214,18 +248,14 @@ TestResults/
             $releaseExists = $false
         }
         $ErrorActionPreference = 'Stop'
-        $assets = @()
-        if ($outputBinPath) { $assets += $outputBinPath.FullName }
-        if ($outputFrameworkExe) { $assets += $outputFrameworkExe.FullName }
-        if ($outputStandaloneExe) { $assets += $outputStandaloneExe.FullName }
         if ($existingRelease -and $releaseExists) {
             Write-Host "Release $tag already exists. Uploading asset(s)..."
             foreach ($asset in $assets) {
-                gh release upload $tag $asset --clobber
+                gh release upload $tag $($asset.FullName) --clobber
             }
         } else {
             Write-Host "Creating new release $tag and uploading asset(s)..."
-            gh release create $tag $assets --title "$releaseName" --notes "$releaseNotes"
+            gh release create $tag ($assets | ForEach-Object { $_.FullName }) --title "$releaseName" --notes "$releaseNotes"
         }
     }
 
