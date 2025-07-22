@@ -68,7 +68,9 @@ foreach ($csproj in $csprojFiles) {
 
     # Project and output variables (define as early as possible)
     $projectName = [System.IO.Path]::GetFileNameWithoutExtension($csproj)
+    Write-Host "Project name: $projectName"
     $projectDir = Split-Path $csproj -Parent
+    Write-Host "Project directory: $projectDir"
     Push-Location $projectDir
     [xml]$projectXml = Get-Content $csproj
     $projectAssemblyNameNode = $projectXml.Project.PropertyGroup | Where-Object { $_.AssemblyName } | Select-Object -First 1
@@ -77,7 +79,13 @@ foreach ($csproj in $csprojFiles) {
     $projectRIDsNode = $projectXml.Project.PropertyGroup | Where-Object { $_.RuntimeIdentifiers } | Select-Object -First 1
     $projectFrameworkNode = $projectXml.Project.PropertyGroup | Where-Object { $_.Framework } | Select-Object -First 1
     $projectTargetFrameworkNode = $projectXml.Project.PropertyGroup | Where-Object { $_.TargetFramework } | Select-Object -First 1
-    $projectFramework = $projectTargetFrameworkNode.TargetFramework ?? $projectFrameworkNode.Framework;
+    $projectFramework = $null
+    if ($projectTargetFrameworkNode -and $projectTargetFrameworkNode.TargetFramework) {
+        $projectFramework = $projectTargetFrameworkNode.TargetFramework
+    } elseif ($projectFrameworkNode -and $projectFrameworkNode.Framework) {
+        $projectFramework = $projectFrameworkNode.Framework
+    }
+    Write-Host "Project framework: $projectFramework"
 
     # Determine architecture
     if ($Arch) {
@@ -96,20 +104,28 @@ foreach ($csproj in $csprojFiles) {
     $outputBinarySuffix = ".$arch"
 
     $outputType = $projectXml.Project.PropertyGroup | Where-Object { $_.OutputType } | Select-Object -First 1
-    $outputIsExe = $outputType.OutputType -eq 'Exe'
+    Write-Host "Output type: $outputType"
+    $outputIsExe = $false
+    if ($outputType.OutputType) {
+        $outputTypeValue = $outputType.OutputType.ToString()
+        $outputIsExe = ($outputTypeValue -ieq 'Exe' -or $outputTypeValue -ieq 'WinExe')
+    }
     $outputBinDir = Join-Path $projectDir 'bin'
+    Write-Host "Output binary directory: $outputBinDir"
     $outputAssemblyName = $null
     if ($projectAssemblyNameNode -and $projectAssemblyNameNode.AssemblyName -and $projectAssemblyNameNode.AssemblyName -ne "") {
         $outputAssemblyName = $projectAssemblyNameNode.AssemblyName
     } else {
         $outputAssemblyName = $projectName
     }
+    Write-Host "Output assembly name: $outputAssemblyName"
 
     if (-not $projectVersionNode) {
         Write-Error "No <Version> property found in any <PropertyGroup> in $csproj"
         exit 1
     }
     $oldVersion = $projectVersionNode.Version
+    Write-Host "Old version: $oldVersion"
     if ($Version) {
         Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
         $newVersion = $Version
@@ -117,60 +133,85 @@ foreach ($csproj in $csprojFiles) {
         $newVersion = Bump-Version -oldVersion $oldVersion
         Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
     }
+    Write-Host "New version: $newVersion"
+
+    function Kill-ProcessesByName {
+        param (
+            [string[]]$Names
+        )
+        foreach ($procName in $Names) {
+            $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+            if ($procs) {
+                Write-Host "Killing running process(es) named $procName..."
+                foreach ($proc in $procs) {
+                    try {
+                        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                        Write-Host "Killed process $($proc.Id) ($($proc.ProcessName))"
+                    } catch {
+                        Write-Host "Failed to kill process $($proc.Id): $_" -ForegroundColor Yellow
+                    }
+                }
+            }
+        }
+    }
+    $processNames = @($outputAssemblyName, "dotnet")
+    Kill-ProcessesByName -Names $processNames
 
     dotnet clean
+    # Delete bin and obj folders if they exist
+    if (Test-Path $outputBinDir) { Remove-Item -Recurse -Force $outputBinDir }
+    if (Test-Path "$projectDir/obj") { Remove-Item -Recurse -Force "$projectDir/obj" }
     if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
 
     $outputFrameworkExe = $null;$outputStandaloneExe = $null;$outputBinPath = $null
-    if ($outputIsExe) {
-        Write-Host "Building EXE..."
-        # Framework-dependent build
-        dotnet publish -c Release -r $arch --self-contained false
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        $outputFrameworkExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
-        $fwExeName = "$outputAssemblyName$outputFrameworkSuffix"
-        if ($outputFrameworkExe) {
-            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
-            Write-Host "Framework-dependent EXE built successfully: $fwExeName"
-        }
-
-        # Self-contained build
-        dotnet publish -c Release -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        $outputStandaloneExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        $scExeName = "$outputAssemblyName$outputSelfcontainedSuffix"
-        if ($outputStandaloneExe) {
-            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
-            Write-Host "Self-contained EXE built successfully: $scExeName"
-        }
-        # For upload, always use the arch-suffixed names
-        if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
-            $outputBinPath = Join-Path $outputBinDir $fwExeName
-        } elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
-            $outputBinPath = Join-Path $outputBinDir $scExeName
-        }
+    Write-Host "Building DLL..."
+    dotnet publish -c Release -r $arch 
+    $dllPath = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
+    Write-Host "Output DLL: $dllPath"
+    if ($dllPath) {
+        $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffix.dll"
+        Copy-Item $dllPath.FullName $dllDest -Force
+        Write-Host "DLL built successfully: $dllDest"
     } else {
-        Write-Host "Building DLL..."
-        dotnet publish -c Release -r $arch 
-        $dllPath = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.$outputBinarySuffix" -Recurse | Select-Object -First 1
-        if ($dllPath) {
-            Copy-Item $dllPath.FullName (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix") -Force
-            Write-Host "DLL built successfully: $outputAssemblyName$outputBinarySuffix.dll"
-        } else {
-            Write-Host "DLL not found after build" -ForegroundColor Red
-        }
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        # For upload, always use the arch-suffixed DLL name
-        $outputBinPath = $null
-        if (Test-Path (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix")) {
-            $outputBinPath = Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix"
-        }
+        Write-Host "DLL not found after build" -ForegroundColor Red
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+    }
+    $outputBinPath = $null
+    if (Test-Path (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix")) {
+        $outputBinPath = Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix"
+    }
+    Write-Host "Building Framework-dependent EXE..."
+    # Framework-dependent build
+    dotnet publish -c Release -r $arch --self-contained false
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+    }
+    $outputFrameworkExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+    Write-Host "Output framework EXE: $outputFrameworkExe"
+    $fwExeName = "$outputAssemblyName$outputFrameworkSuffix"
+    if ($outputFrameworkExe) {
+        Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
+        Write-Host "Framework-dependent EXE built successfully: $fwExeName"
+    }
+    Write-Host "Building Self-contained EXE..."
+    dotnet publish -c Release -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+    }
+    $outputStandaloneExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    Write-Host "Output standalone EXE: $outputStandaloneExe"
+    $scExeName = "$outputAssemblyName$outputSelfcontainedSuffix"
+    if ($outputStandaloneExe) {
+        Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
+        Write-Host "Self-contained EXE built successfully: $scExeName"
+    }
+    # For upload, always use the arch-suffixed names
+    if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
+        $outputBinPath = Join-Path $outputBinDir $fwExeName
+    } elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
+        $outputBinPath = Join-Path $outputBinDir $scExeName
     }
 
     # Check if .git exists, if not, initialize git repo
@@ -235,6 +276,7 @@ TestResults/
             Pop-Location
             exit 1
         }
+        Write-Host "Assets: $assets"
 
         $tag = "v$newVersion"
         $releaseName = "Release $newVersion"
