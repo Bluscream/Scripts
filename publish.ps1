@@ -7,15 +7,8 @@ param(
 )
 
 function Bump-Version {
-    param([string]$csproj)
-    [xml]$projXml = Get-Content $csproj
-    $versionNode = $projXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
-    if (-not $versionNode) {
-        Write-Error "No <Version> property found in any <PropertyGroup> in $csproj"
-        exit 1
-    }
-    $version = $versionNode.Version
-    $parts = $version -split '\.'
+    param([string]$oldVersion)
+    $parts = $oldVersion -split '\.'
     # Ensure at least 4 parts
     while ($parts.Count -lt 4) { $parts += '0' }
     $major = [int]$parts[0]
@@ -29,8 +22,8 @@ function Bump-Version {
     }
     # If patch ever needs to roll over, add logic here
     $newVersion = "$major.$minor.$patch.$build"
-    Write-Host "Bumped Version: $version -> $newVersion"
-    return @{ Xml = $projXml; VersionNode = $versionNode; NewVersion = $newVersion; OldVersion = $version }
+    Write-Host "Bumped Version: $oldVersion -> $newVersion"
+    return $newVersion
 }
 function Set-Version {
     param(
@@ -72,35 +65,70 @@ if (-not $Csproj) {
 foreach ($csproj in $csprojFiles) {
     Write-Host "Processing $csproj..."
 
-    # Bump version
-    $bumpResult = Bump-Version -csproj $csproj
+    # Project and output variables (define as early as possible)
+    $projectName = [System.IO.Path]::GetFileNameWithoutExtension($csproj)
+    $projectDir = Split-Path $csproj -Parent
+    Push-Location $projectDir
+    [xml]$projectXml = Get-Content $csproj
+    $projectAssemblyNameNode = $projectXml.Project.PropertyGroup | Where-Object { $_.AssemblyName } | Select-Object -First 1
+    $projectVersionNode = $projectXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
+
+    $outputType = $projectXml.Project.PropertyGroup | Where-Object { $_.OutputType } | Select-Object -First 1
+    $outputIsExe = $outputType.OutputType -eq 'Exe'
+    $outputBinDir = Join-Path $projectDir 'bin'
+    $outputAssemblyName = $null
+    if ($projectAssemblyNameNode -and $projectAssemblyNameNode.AssemblyName -and $projectAssemblyNameNode.AssemblyName -ne "") {
+        $outputAssemblyName = $projectAssemblyNameNode.AssemblyName
+    } else {
+        $outputAssemblyName = $projectName
+    }
+
+    if (-not $projectVersionNode) {
+        Write-Error "No <Version> property found in any <PropertyGroup> in $csproj"
+        exit 1
+    }
+    $oldVersion = $projectVersionNode.Version
     if ($Version) {
-        Set-Version -projXml $bumpResult.Xml -versionNode $bumpResult.VersionNode -newVersion $Version -csproj $csproj
+        Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
         $newVersion = $Version
     } else {
-        Set-Version -projXml $bumpResult.Xml -versionNode $bumpResult.VersionNode -newVersion $bumpResult.NewVersion -csproj $csproj
-        $newVersion = $bumpResult.NewVersion
+        $newVersion = Bump-Version -oldVersion $oldVersion
+        Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
     }
-
-    $oldVersion = $bumpResult.OldVersion
-
-    # Build nupkg
-    $projDir = Split-Path $csproj -Parent
-    Push-Location $projDir
 
     dotnet clean
-    # Check if the project is an executable
-    [xml]$projXml = Get-Content $csproj
-    $outputType = $projXml.Project.PropertyGroup | Where-Object { $_.OutputType } | Select-Object -First 1
-    $isExe = $outputType.OutputType -eq 'Exe'
+    if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
 
-    if ($isExe) {
-        $ret = dotnet publish -c Release --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+    $outputFrameworkExe = $null;$outputStandaloneExe = $null
+    if ($outputIsExe) {
+        Write-Host "Building EXE..."
+        # Framework-dependent build
+        $ret1 = dotnet publish -c Release -r win-x64 --self-contained false
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE) $ret1" -ForegroundColor Red
+        }
+        $outputFrameworkExe = Get-ChildItem -Path "bin/Release/net*/win-x64/publish/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+        if ($outputFrameworkExe) {
+            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir "$outputAssemblyName.framework.exe") -Force
+        }
+
+        # Self-contained build
+        $ret2 = dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE) $ret2" -ForegroundColor Red
+        }
+        $outputStandaloneExe = Get-ChildItem -Path "bin/Release/net*/win-x64/publish/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($outputStandaloneExe) {
+            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir "$outputAssemblyName.standalone.exe") -Force
+        }
     } else {
+        Write-Host "Building DLL..."
         $ret = dotnet publish -c Release
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error during dotnet publish $($LASTEXITCODE) $ret" -ForegroundColor Red
+        Copy-Item "bin/Release/net*/win-x64/publish/$outputAssemblyName.dll" (Join-Path $outputBinDir "$outputAssemblyName.dll") -Force
+        Write-Host "DLL built successfully"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during dotnet publish $($LASTEXITCODE) $ret" -ForegroundColor Red
+        }
     }
 
     # Check if .git exists, if not, initialize git repo
@@ -144,7 +172,6 @@ TestResults/
         git commit -m "Initial commit"
 
         # Create GitHub repo using gh cli
-        $projectName = [System.IO.Path]::GetFileNameWithoutExtension($csproj)
         Write-Host "Creating GitHub repository $projectName..."
         gh repo create $projectName --source . --public --confirm
 
@@ -160,22 +187,25 @@ TestResults/
     }
 
     if ($Github) {
-        # dotnet build --configuration Release
-    
-        $projectName = [System.IO.Path]::GetFileNameWithoutExtension($csproj)
-        $binPath = Get-ChildItem -Path 'bin/Release' -Include "$projectName.dll", "$projectName.exe" -Recurse | Select-Object -First 1
-        if (-not $binPath) {
-            Write-Error "No DLL or EXE found after build for $projectName."
+        $outputBinPath = Get-ChildItem -Path $outputBinDir -Include "$outputAssemblyName.dll", "$outputAssemblyName.exe", "$outputAssemblyName.framework.exe", "$outputAssemblyName.standalone.exe" -Recurse | Select-Object -First 1
+        $outputExeFramework = Join-Path $outputBinDir "$outputAssemblyName.framework.exe"
+        $outputExeStandalone = Join-Path $outputBinDir "$outputAssemblyName.standalone.exe"
+        $outputExeDefault = Join-Path $outputBinDir "$outputAssemblyName.exe"
+        $assets = @()
+        if ($outputBinPath) { $assets += $outputBinPath.FullName }
+        if (Test-Path $outputExeDefault) { $assets += $outputExeDefault }
+        if (Test-Path $outputExeFramework) { $assets += $outputExeFramework }
+        if (Test-Path $outputExeStandalone) { $assets += $outputExeStandalone }
+        if (-not $assets) {
+            Write-Error "No DLL or EXE found after build for $outputAssemblyName."
             Pop-Location
             exit 1
         }
 
-        # Create a new GitHub release for the new version and upload the DLL
         $tag = "v$newVersion"
         $releaseName = "Release $newVersion"
         $releaseNotes = "Automated release for version $newVersion."
 
-        # Check if the release already exists
         $ErrorActionPreference = 'SilentlyContinue'
         try {
             $existingRelease = & gh release view $tag 2>$null
@@ -184,12 +214,18 @@ TestResults/
             $releaseExists = $false
         }
         $ErrorActionPreference = 'Stop'
+        $assets = @()
+        if ($outputBinPath) { $assets += $outputBinPath.FullName }
+        if ($outputFrameworkExe) { $assets += $outputFrameworkExe.FullName }
+        if ($outputStandaloneExe) { $assets += $outputStandaloneExe.FullName }
         if ($existingRelease -and $releaseExists) {
-            Write-Host "Release $tag already exists. Uploading asset..."
-            gh release upload $tag $binPath.FullName --clobber
+            Write-Host "Release $tag already exists. Uploading asset(s)..."
+            foreach ($asset in $assets) {
+                gh release upload $tag $asset --clobber
+            }
         } else {
-            Write-Host "Creating new release $tag and uploading asset..."
-            gh release create $tag $binPath.FullName --title "$releaseName" --notes "$releaseNotes"
+            Write-Host "Creating new release $tag and uploading asset(s)..."
+            gh release create $tag $assets --title "$releaseName" --notes "$releaseNotes"
         }
     }
 
