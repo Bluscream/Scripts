@@ -4,8 +4,36 @@ param(
     [string]$Version,
     [switch]$Nuget,
     [switch]$Github,
-    [string]$Arch
+    [string]$Arch,
+    [switch]$Git
 )
+
+$gitignore_template = @"
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.nupkg
+*.snupkg
+*.log
+*.DS_Store
+*.swp
+*.scc
+*.pdb
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.bak
+*.tmp
+*.cache
+*.TestResults/
+TestResults/
+"@
 
 function Bump-Version {
     param([string]$oldVersion)
@@ -121,19 +149,30 @@ foreach ($csproj in $csprojFiles) {
     Write-Host "Output assembly name: $outputAssemblyName"
 
     if (-not $projectVersionNode) {
-        Write-Error "No <Version> property found in any <PropertyGroup> in $csproj"
-        exit 1
-    }
-    $oldVersion = $projectVersionNode.Version
-    Write-Host "Old version: $oldVersion"
-    if ($Version) {
-        Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
-        $newVersion = $Version
+        Write-Host "No <Version> property found in any <PropertyGroup> in $csproj. Creating one with default version 1.0.0.0."
+        $firstPropertyGroup = $projectXml.Project.PropertyGroup | Select-Object -First 1
+        if (-not $firstPropertyGroup) {
+            Write-Error "No <PropertyGroup> found in $csproj to add <Version> property."
+            exit 1
+        }
+        $newVersion = '1.0.0.0'
+        $versionElement = $projectXml.CreateElement('Version')
+        $versionElement.InnerText = $newVersion
+        $firstPropertyGroup.AppendChild($versionElement) | Out-Null
+        $projectXml.Save($csproj)
+        Write-Host "Created <Version> property with value $newVersion in $csproj."
     } else {
-        $newVersion = Bump-Version -oldVersion $oldVersion
-        Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
+        $oldVersion = $projectVersionNode.Version
+        Write-Host "Old version: $oldVersion"
+        if ($Version) {
+            Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
+            $newVersion = $Version
+        } else {
+            $newVersion = Bump-Version -oldVersion $oldVersion
+            Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
+        }
+        Write-Host "New version: $newVersion"
     }
-    Write-Host "New version: $newVersion"
 
     function Kill-ProcessesByName {
         param (
@@ -214,60 +253,42 @@ foreach ($csproj in $csprojFiles) {
         $outputBinPath = Join-Path $outputBinDir $scExeName
     }
 
-    # Check if .git exists, if not, initialize git repo
-    if (-not (Test-Path ".git")) {
-        Write-Host "Initializing new git repository..."
-        git init
-
-        # Create .gitignore if it does not exist
-        if (-not (Test-Path ".gitignore")) {
-            Write-Host "Creating .gitignore file..."
-            @"
-bin/
-obj/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-.vs/
-*.nupkg
-*.snupkg
-*.log
-*.DS_Store
-*.swp
-*.scc
-*.pdb
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
-*.bak
-*.tmp
-*.cache
-*.TestResults/
-TestResults/
-"@ | Out-File -Encoding utf8 ".gitignore"
-        }
-
-        # Add all files and commit
-        git add .
-        git commit -m "Initial commit"
-
-        # Create GitHub repo using gh cli
+    function Create-GitHubRepo {
         Write-Host "Creating GitHub repository $projectName..."
-        gh repo create $projectName --source . --public --confirm
-
-        # Set remote origin if not set (gh repo create usually does this, but just in case)
-        if (-not (git remote | Select-String "origin")) {
+        $repoUrl = git remote get-url origin
+        if (-not $repoUrl) {
+            gh repo create $projectName --source . --public --confirm
             $repoUrl = gh repo view $projectName --json url -q ".url"
             git remote add origin $repoUrl
+            return $repoUrl
+        } else {
+            Write-Host "GitHub repository for $projectName already exists."
+        }
+    }
+
+    function Push-Git {
+        Write-Host "Committing and pushing changes to git..."
+
+        if (-not (Test-Path ".git")) {
+            Write-Host "Initializing new git repository..."
+            git init        
+            git branch -M main
         }
 
-        # Push to GitHub
-        git branch -M main
-        git push -u origin main
+        if (-not (Test-Path ".gitignore")) {
+            Write-Host "Creating .gitignore file..."
+            $gitignore_template | Out-File -Encoding utf8 ".gitignore"
+        }
+        git add .
+        $datetime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        git commit -m "Publish at $datetime"
+        git push
     }
+
+    if ($Git) {
+        Push-Git
+    }
+
 
     if ($Github) {
         $assets = @(Get-ChildItem -Path $outputBinDir -Filter *.exe -File) + @(Get-ChildItem -Path $outputBinDir -Filter *.dll -File)
@@ -283,6 +304,7 @@ TestResults/
         $releaseNotes = "Automated release for version $newVersion."
 
         $ErrorActionPreference = 'SilentlyContinue'
+        $repoUrl = Create-GitHubRepo
         try {
             $existingRelease = & gh release view $tag 2>$null
             $releaseExists = $true
