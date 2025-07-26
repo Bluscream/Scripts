@@ -197,24 +197,19 @@ function Clear-Windows {
 function Clear-WindowsEventlogs {
     Set-Title "Cleaning Windows event logs"
     $LogNames = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LogName
-    Write-Host "Found $($LogNames.Count) event logs"
+    Write-Host "Cleaning $($LogNames.Count) event logs"
+    $cleaned = 0
     foreach ($LogName in $LogNames) {
-        $txt = "Clearing $LogName"
-        $logSizeMB = -1
         try {
-            $fistLogEvent = Get-WinEvent -LogName $LogName -MaxEvents 1 --ErrorAction SilentlyContinue
-            $logSizeMB = $fistLogEvent.MaximumSizeInBytes / 1MB
-            $txt += " ($logSizeMB MB)"
-        }
-        catch { }
-        Write-Host $txt
-        try {
-            wevtutil.exe cl "$LogName"
+            Start-Process -FilePath "wevtutil.exe" -ArgumentList "cl `"$LogName`"" -NoNewWindow # -WindowStyle Hidden  -Wait
+            $cleaned++
         }
         catch {
-            Write-Host "Failed to clear $LogName. Error: $_"
+            $errStr = "Failed to clear $LogName. Error: $_"
+            Write-Host -NoNewline $errStr
         }
     }
+    Write-Host "Successfully cleaned $cleaned/$($LogNames.Count) logs"
 }
 
 # Extend or override $possibleSteps directly
