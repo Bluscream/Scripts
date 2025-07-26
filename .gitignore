@@ -43,3 +43,4 @@ ActionCenterEvents.json
 banner.json
 ActionCenterEvents.exe
 BlockShutdown.exe
+/service-discovery/devices/

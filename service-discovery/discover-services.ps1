@@ -52,9 +52,10 @@ function Write-ServiceOutput {
         [string]$Status = "",
         [string]$Ping = "",
         [string]$Source = "",
-        [string]$Note = ""
+        [string[]]$Notes = @()
     )
-    $Note = $Note.Trim().Replace("`n", " ").Replace("`r", " ")
+    $Notes = $Notes | ForEach-Object { $_.Trim().Replace("`n", " ").Replace("`r", " ").Replace(",", "<comma>") }
+    $Note = $Notes -join ","
     $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source;$Note"
     Write-DiscoveryLine $line
 }
@@ -189,20 +190,20 @@ function Test-HttpProtocol {
     try {
         $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
-            $note = "HTTP $($resp.StatusCode)"
-            if ($resp.Headers.Server) { $note += " Server:$($resp.Headers.Server)" }
-            if ($resp.Headers.'X-Powered-By') { $note += " PoweredBy:$($resp.Headers.'X-Powered-By')" }
-            return @{ protocol = 'HTTP'; note = $note }
+            $notes = @("Status: $($resp.StatusCode)")
+            if ($resp.Headers.Server) { $notes += "Server: $($resp.Headers.Server)" }
+            if ($resp.Headers.'X-Powered-By') { $notes += "PoweredBy: $($resp.Headers.'X-Powered-By')" }
+            return @{ protocol = 'HTTP'; notes = $notes }
         }
     }
     catch {}
     try {
         $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
-            $note = "HTTPS $($resp.StatusCode)"
-            if ($resp.Headers.Server) { $note += " Server:$($resp.Headers.Server)" }
-            if ($resp.Headers.'X-Powered-By') { $note += " PoweredBy:$($resp.Headers.'X-Powered-By')" }
-            return @{ protocol = 'HTTPS'; note = $note }
+            $notes = @("Status: $($resp.StatusCode)")
+            if ($resp.Headers.Server) { $notes += "Server: $($resp.Headers.Server)" }
+            if ($resp.Headers.'X-Powered-By') { $notes += "PoweredBy: $($resp.Headers.'X-Powered-By')" }
+            return @{ protocol = 'HTTPS'; notes = $notes }
         }
     }
     catch {}
@@ -512,8 +513,10 @@ try {
                 $note = "Banner: $($unifiedResult.banner)"
             }
         }
+
+        $notes = @($note)
         
-        Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Note $note
+        Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
     }
 }
 catch {
@@ -548,8 +551,10 @@ try {
                     $note = "Banner: $($unifiedResult.banner)"
                 }
             }
+
+            $notes = @($note)
             
-            Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $port -Source 'netstat' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Note $note
+            Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $port -Source 'netstat' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
         }
     }
 }
@@ -585,8 +590,8 @@ try {
                             $note = "Banner: $($unifiedResult.banner)"
                         }
                     }
-                    
-                    Write-ServiceOutput -ServiceName $service.Name -Protocol $protocol -Port $conn.LocalPort -Source 'Windows Service' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Note $note
+                    $notes = @($note)
+                    Write-ServiceOutput -ServiceName $service.Name -Protocol $protocol -Port $conn.LocalPort -Source 'Windows Service' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
                 }
             }
         }
@@ -627,8 +632,8 @@ if ($IncludeDocker) {
                                 $note = "Banner: $($unifiedResult.banner)"
                             }
                         }
-                        
-                        Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $dockerProtocol -Port $hostPort -Source "Docker" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Note $note
+                        $notes = @($note)
+                        Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $dockerProtocol -Port $hostPort -Source "Docker" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
                     }
                 }
             }
@@ -664,8 +669,8 @@ if ($IncludeWSL) {
                         $note = "Banner: $($unifiedResult.banner)"
                     }
                 }
-                
-                Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol $protocol -Port $conn.LocalPort -Source "WSL" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Note $note
+                $notes = @($note)
+                Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol $protocol -Port $conn.LocalPort -Source "WSL" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
             }
         }
     }
@@ -684,7 +689,8 @@ try {
         if ($serviceName -eq "Unknown") {
             $serviceName = Get-ServiceNameFromPort -Port $conn.LocalPort
         }
-        Write-ServiceOutput -ServiceName $serviceName -Protocol "UDP" -Port $conn.LocalPort -Source "Get-NetUDPEndpoint" -Note "UDP service"
+        $notes = @("UDP service")
+        Write-ServiceOutput -ServiceName $serviceName -Protocol "UDP" -Port $conn.LocalPort -Source "Get-NetUDPEndpoint" -Notes $notes
     }
 }
 catch {
