@@ -101,12 +101,12 @@ function Get-ServiceNameFromPort {
     return "Unknown"
 }
 
-# Function to test TCP connectivity and measure ping time
+# Function to test TCP connectivity and measure ping time (optimized)
 function Test-TcpPort {
     param(
         [string]$Host_,
         [int]$Port,
-        [int]$TimeoutMs = 1500
+        [int]$TimeoutMs = 500  # Reduced from 1500ms to 500ms
     )
     $tcpClient = $null
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -134,30 +134,65 @@ function Test-TcpPort {
     }
 }
 
-# Function to try HTTP/HTTPS request
+# Function to try HTTP/HTTPS request (optimized)
 function Test-HttpProtocol {
     param(
         [string]$Host_,
         [int]$Port,
-        [int]$TimeoutMs = 1500
+        [int]$TimeoutMs = 500  # Reduced from 1500ms to 500ms
     )
     $urlHttp = "http://$($Host_):$Port/"
     $urlHttps = "https://$($Host_):$Port/"
     try {
-        $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec ([math]::Ceiling($TimeoutMs / 1000)) -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
             return 'HTTP'
         }
     }
     catch {}
     try {
-        $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec ([math]::Ceiling($TimeoutMs / 1000)) -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
             return 'HTTPS'
         }
     }
     catch {}
     return $null
+}
+
+# Cache for connection results to avoid duplicate tests
+$connectionCache = @{}
+
+# Optimized function to test connection with caching
+function Test-ConnectionWithCache {
+    param(
+        [string]$Host_,
+        [int]$Port
+    )
+    $cacheKey = "$Host_`:$Port"
+    if ($connectionCache.ContainsKey($cacheKey)) {
+        return $connectionCache[$cacheKey]
+    }
+    
+    $result = Test-TcpPort -Host $Host_ -Port $Port
+    $connectionCache[$cacheKey] = $result
+    return $result
+}
+
+# Optimized function to test HTTP with caching
+function Test-HttpWithCache {
+    param(
+        [string]$Host_,
+        [int]$Port
+    )
+    $cacheKey = "http_$Host_`:$Port"
+    if ($connectionCache.ContainsKey($cacheKey)) {
+        return $connectionCache[$cacheKey]
+    }
+    
+    $result = Test-HttpProtocol -Host $Host_ -Port $Port
+    $connectionCache[$cacheKey] = $result
+    return $result
 }
 
 Write-DiscoveryLine "# Service Discovery Results"
@@ -179,8 +214,8 @@ try {
         if ($serviceName -eq "Unknown") {
             $serviceName = Get-ServiceNameFromPort -Port $conn.LocalPort
         }
-        $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-        $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+        $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $conn.LocalPort
+        $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
         Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $result.status -Ping $result.ping
     }
 }
@@ -201,8 +236,8 @@ try {
             if ($serviceName -eq "Unknown") {
                 $serviceName = Get-ServiceNameFromPort -Port $port
             }
-            $result = Test-TcpPort -Host '127.0.0.1' -Port $port
-            $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $port; if ($detectedHttp) { $protocol = $detectedHttp } }
+            $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $port
+            $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $port; if ($detectedHttp) { $protocol = $detectedHttp } }
             Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $port -Source 'netstat' -Status $result.status -Ping $result.ping
         }
     }
@@ -224,8 +259,8 @@ try {
             
             if ($tcpConnections) {
                 foreach ($conn in $tcpConnections) {
-                    $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-                    $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+                    $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $conn.LocalPort
+                    $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
                     Write-ServiceOutput -ServiceName $service.Name -Protocol $protocol -Port $conn.LocalPort -Source 'Windows Service' -Status $result.status -Ping $result.ping
                 }
             }
@@ -252,8 +287,8 @@ if ($IncludeDocker) {
                         $hostPort = $matches[2]
                         $containerPort = $matches[3]
                         $protocol = $matches[4].ToUpper()
-                        $result = Test-TcpPort -Host '127.0.0.1' -Port $hostPort
-                        $dockerProtocol = $protocol; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $hostPort; if ($detectedHttp) { $dockerProtocol = $detectedHttp } }
+                        $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $hostPort
+                        $dockerProtocol = $protocol; if ($result.status -eq 'success') { $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $hostPort; if ($detectedHttp) { $dockerProtocol = $detectedHttp } }
                         Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $dockerProtocol -Port $hostPort -Source "Docker" -Status $result.status -Ping $result.ping
                     }
                 }
@@ -275,8 +310,8 @@ if ($IncludeWSL) {
             $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $process.Id -and $_.State -eq "Listen" }
             
             foreach ($conn in $tcpConnections) {
-                $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-                $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+                $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $conn.LocalPort
+                $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
                 Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol $protocol -Port $conn.LocalPort -Source "WSL" -Status $result.status -Ping $result.ping
             }
         }

@@ -71,6 +71,95 @@ write_discovery_line() {
     echo "$line"
 }
 
+# Cache for connection results to avoid duplicate tests
+declare -A connection_cache
+
+# Optimized function to test TCP connectivity with caching
+test_tcp_port() {
+    local host="$1"
+    local port="$2"
+    local cache_key="${host}:${port}"
+    
+    # Check cache first
+    if [[ -n "${connection_cache[$cache_key]}" ]]; then
+        echo "${connection_cache[$cache_key]}"
+        return
+    fi
+    
+    # Test connection with timeout (reduced from 1.5s to 0.5s)
+    local result
+    if timeout 0.5 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
+        result="success"
+    else
+        result="refused"
+    fi
+    
+    # Cache the result
+    connection_cache[$cache_key]="$result"
+    echo "$result"
+}
+
+# Optimized function to test HTTP/HTTPS with caching
+test_http_protocol() {
+    local host="$1"
+    local port="$2"
+    local cache_key="http_${host}:${port}"
+    
+    # Check cache first
+    if [[ -n "${connection_cache[$cache_key]}" ]]; then
+        echo "${connection_cache[$cache_key]}"
+        return
+    fi
+    
+    local result=""
+    
+    # Test HTTP with curl (faster than wget)
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s -m 1 "http://$host:$port/" >/dev/null 2>&1; then
+            result="HTTP"
+        elif curl -s -m 1 -k "https://$host:$port/" >/dev/null 2>&1; then
+            result="HTTPS"
+        fi
+    else
+        # Fallback to wget
+        if wget -q --timeout=1 --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
+            result="HTTP"
+        elif wget -q --timeout=1 --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
+            result="HTTPS"
+        fi
+    fi
+    
+    # Cache the result
+    connection_cache[$cache_key]="$result"
+    echo "$result"
+}
+
+# Optimized function to write service output with connection testing
+write_service_output_optimized() {
+    local service_name="$1"
+    local protocol="$2"
+    local port="$3"
+    local source="$4"
+    
+    # Only test TCP connections (skip UDP)
+    if [[ "$protocol" == "TCP" ]]; then
+        local tcp_result
+        tcp_result=$(test_tcp_port "127.0.0.1" "$port")
+        
+        if [[ "$tcp_result" == "success" ]]; then
+            local http_protocol
+            http_protocol=$(test_http_protocol "127.0.0.1" "$port")
+            if [[ -n "$http_protocol" ]]; then
+                protocol="$http_protocol"
+            fi
+        fi
+        
+        write_service_output "$service_name" "$protocol" "$port" "$tcp_result" "0" "$source"
+    else
+        write_service_output "$service_name" "$protocol" "$port" "Listening" "0" "$source"
+    fi
+}
+
 # Function to write output in required format
 write_service_output() {
     local service_name="$1"
@@ -80,7 +169,7 @@ write_service_output() {
     local ping="$5"
     local source="$6"
     write_discovery_line "$hostname;$service_name;$protocol;$port;$status;$ping;$source"
-}a
+}
 
 # Function to get service name from port
 get_service_name_from_port() {
@@ -165,7 +254,7 @@ if command -v lsof >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output "$process_name" "TCP" "$port" "Listening" "0" "lsof" ""
+                write_service_output_optimized "$process_name" "TCP" "$port" "lsof"
             fi
         fi
     done
@@ -185,7 +274,7 @@ if command -v lsof >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output "$process_name" "UDP" "$port" "Listening" "0" "lsof" ""
+                write_service_output_optimized "$process_name" "UDP" "$port" "lsof"
             fi
         fi
     done
@@ -211,7 +300,7 @@ if command -v ss >/dev/null 2>&1; then
                     if [[ "$process_name" == "Unknown" ]]; then
                         process_name=$(get_service_name_from_port "$port")
                     fi
-                    write_service_output "$process_name" "TCP" "$port" "Listening" "0" "ss" ""
+                    write_service_output_optimized "$process_name" "TCP" "$port" "ss"
                 fi
             fi
         fi
@@ -238,7 +327,7 @@ if command -v netstat >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output "$process_name" "TCP" "$port" "Listening" "0" "netstat" ""
+                write_service_output_optimized "$process_name" "TCP" "$port" "netstat"
             fi
         fi
     done
@@ -260,7 +349,7 @@ if [[ "$INCLUDE_DOCKER" == "true" ]]; then
                 while [[ $ports =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)->([0-9]+)/([[:alpha:]]+) ]]; do
                     host_port="${BASH_REMATCH[2]}"
                     protocol="${BASH_REMATCH[4]}"
-                    write_service_output "Docker-$container_name" "${protocol^^}" "$host_port" "Listening" "0" "docker" ""
+                    write_service_output_optimized "Docker-$container_name" "${protocol^^}" "$host_port" "docker"
                     # Remove the matched part to find more ports
                     ports="${ports#*${BASH_REMATCH[0]}}"
                 done
@@ -287,7 +376,7 @@ if [[ "$INCLUDE_SYSTEMD" == "true" ]]; then
                         lsof -iTCP -sTCP:LISTEN -p "$service_pid" -n -P 2>/dev/null | tail -n +2 | while read -r lsof_line; do
                             if [[ $lsof_line =~ :([0-9]+)$ ]]; then
                                 port="${BASH_REMATCH[1]}"
-                                write_service_output "$service_name" "TCP" "$port" "Listening" "0" "systemd" ""
+                                write_service_output_optimized "$service_name" "TCP" "$port" "systemd"
                             fi
                         done
                     fi
@@ -316,7 +405,7 @@ if command -v kubectl >/dev/null 2>&1; then
                 if [[ $ports =~ ([0-9]+):([0-9]+)/([[:alpha:]]+) ]]; then
                     node_port="${BASH_REMATCH[2]}"
                     protocol="${BASH_REMATCH[3]}"
-                    write_service_output "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "Listening" "0" "kubernetes" ""
+                    write_service_output_optimized "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "kubernetes"
                 fi
             fi
         fi
