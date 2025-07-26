@@ -4,6 +4,7 @@
 # Output format: <hostname>;<service name>;<protocol>;<port>
 
 param(
+    [string]$OutputFile = "discovery.log",
     [switch]$IncludeDocker = $true,
     [switch]$IncludeWSL = $true,
     [int]$TimeoutMs = 500,
@@ -27,7 +28,14 @@ catch {
     $localIPv4s = @($hostname)
     $localIPv6s = @()
 }
-$logFile = Join-Path $env:TEMP 'discovery.log'
+
+if (!($OutputFile)) {
+    $logFile = Join-Path $env:TEMP 'discovery.log'
+}
+else {
+    $logFile = $OutputFile
+}
+
 # Helper function to write to both stdout and log file
 function Write-DiscoveryLine {
     param(
@@ -54,9 +62,13 @@ function Write-ServiceOutput {
         [string]$Source = "",
         [string[]]$Notes = @()
     )
-    $Notes = $Notes | ForEach-Object { $_.Trim().Replace("`n", " ").Replace("`r", " ").Replace(",", "<comma>") }
-    $Note = $Notes -join ","
-    $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source;$Note"
+    # Clean and sanitize notes
+    $cleanNotes = $Notes | ForEach-Object { 
+        $_.Trim().Replace("`n", " ").Replace("`r", " ").Replace(",", "<comma>") 
+    } | Where-Object { $_ -ne "" }
+    
+    $noteString = $cleanNotes -join ","
+    $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source;$noteString"
     Write-DiscoveryLine $line
 }
 
@@ -298,17 +310,17 @@ function Process-ServiceParallel {
     
     $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $Port
     $finalProtocol = $Protocol
-    $note = ""
+    $notes = @()
     
     if ($unifiedResult.connection.status -eq 'success' -and $Protocol -eq 'TCP') {
         # Check if HTTP/HTTPS was detected
         if ($unifiedResult.protocol) {
             $finalProtocol = $unifiedResult.protocol.protocol
-            if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+            if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
         }
         # Check if banner was retrieved
         elseif ($unifiedResult.banner) {
-            $note = "Banner: $($unifiedResult.banner)"
+            $notes = @("Banner: $($unifiedResult.banner)")
         }
     }
     
@@ -319,7 +331,7 @@ function Process-ServiceParallel {
         Status      = $unifiedResult.connection.status
         Ping        = $unifiedResult.connection.ping
         Source      = $Source
-        Note        = $note
+        Notes       = $notes
     }
 }
 
@@ -402,20 +414,20 @@ function Process-ServicesParallel {
                 try {
                     $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
                     if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
-                        $note = "HTTP $($resp.StatusCode)"
-                        if ($resp.Headers.Server) { $note += " Server:$($resp.Headers.Server)" }
-                        if ($resp.Headers.'X-Powered-By') { $note += " PoweredBy:$($resp.Headers.'X-Powered-By')" }
-                        return @{ protocol = 'HTTP'; note = $note }
+                        $notes = @("Status: $($resp.StatusCode)")
+                        if ($resp.Headers.Server) { $notes += "Server: $($resp.Headers.Server)" }
+                        if ($resp.Headers.'X-Powered-By') { $notes += "PoweredBy: $($resp.Headers.'X-Powered-By')" }
+                        return @{ protocol = 'HTTP'; notes = $notes }
                     }
                 }
                 catch {}
                 try {
                     $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
                     if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
-                        $note = "HTTPS $($resp.StatusCode)"
-                        if ($resp.Headers.Server) { $note += " Server:$($resp.Headers.Server)" }
-                        if ($resp.Headers.'X-Powered-By') { $note += " PoweredBy:$($resp.Headers.'X-Powered-By')" }
-                        return @{ protocol = 'HTTPS'; note = $note }
+                        $notes = @("Status: $($resp.StatusCode)")
+                        if ($resp.Headers.Server) { $notes += "Server: $($resp.Headers.Server)" }
+                        if ($resp.Headers.'X-Powered-By') { $notes += "PoweredBy: $($resp.Headers.'X-Powered-By')" }
+                        return @{ protocol = 'HTTPS'; notes = $notes }
                     }
                 }
                 catch {}
@@ -425,19 +437,19 @@ function Process-ServicesParallel {
             # Test connection first
             $connectionResult = Test-TcpPort -Host '127.0.0.1' -Port $Port
             $finalProtocol = $Protocol
-            $note = ""
+            $notes = @()
             
             if ($connectionResult.status -eq 'success' -and $Protocol -eq 'TCP') {
                 # Test for HTTP/HTTPS first
                 $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $Port
                 if ($detectedHttp) {
                     $finalProtocol = $detectedHttp.protocol
-                    if ($detectedHttp.note) { $note = $detectedHttp.note }
+                    if ($detectedHttp.notes) { $notes = $detectedHttp.notes }
                 }
                 else {
                     # If not HTTP/HTTPS, try to get banner for any TCP port
                     $banner = Get-TcpBanner -Host '127.0.0.1' -Port $Port
-                    if ($banner) { $note = "Banner: $banner" }
+                    if ($banner) { $notes = @("Banner: $banner") }
                 }
             }
             
@@ -448,7 +460,7 @@ function Process-ServicesParallel {
                 Status      = $connectionResult.status
                 Ping        = $connectionResult.ping
                 Source      = $Source
-                Note        = $note
+                Notes       = $notes
             }
         } -ArgumentList $service.ServiceName, $service.Protocol, $service.Port, $service.Source
         
@@ -479,14 +491,55 @@ function Process-ServicesParallel {
     return $results
 }
 
+function Get-OSNameAndVersion {
+    try {
+        $osObj = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+        $os = $osObj.Caption
+        $os = $os.Split(" ")[0]
+        $osVersion = $osObj.Version
+        $osVersion = $osVersion.Split(" ")[0]
+        if (-not $os -or -not $osVersion) {
+            throw "Empty OS or Version"
+        }
+        return "$os $osVersion"
+    }
+    catch {
+        # Fallback: Try using [System.Environment] or 'ver' command
+        try {
+            $os = [System.Environment]::OSVersion.Platform.ToString()
+            $osVersion = [System.Environment]::OSVersion.Version.ToString()
+            if (-not $os -or -not $osVersion) {
+                throw "Empty fallback OS or Version"
+            }
+            return "$os $osVersion"
+        }
+        catch {
+            # Final fallback: Use 'ver' command
+            $ver = cmd /c ver 2>$null
+            if ($ver) {
+                return $ver.Trim()
+            }
+            else {
+                return "Unknown OS"
+            }
+        }
+    }
+}
+
+function Get-MacAddresses {
+    $macAddresses = @()
+    $macAddresses += (Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.MacAddress -and $_.MacAddress -ne "00-00-00-00-00-00" }).MacAddress
+    $macAddresses = $macAddresses | Where-Object { $_ -and $_.Trim() -ne "" }
+    return $macAddresses -join ','
+}
+
 Write-DiscoveryLine "# Service Discovery Results"
 Write-DiscoveryLine "# Generated at $(Get-Date)"
 Write-DiscoveryLine ""
-Write-DiscoveryLine "# hostname;ipv4s;ipv6s"
-Write-DiscoveryLine "# $hostname;$($localIPv4s -join ',');$($localIPv6s -join ',')"
+Write-DiscoveryLine "# hostname;os;ipv4s;ipv6s;macs"
+Write-DiscoveryLine "$hostname;$(Get-OSNameAndVersion);$($localIPv4s -join ',');$($localIPv6s -join ',');$(Get-MacAddresses)"
 Write-DiscoveryLine ""
 Write-DiscoveryLine "# hostname;service name;protocol;port;status;ping ms;source;note"
-
 
 # Method 1: Get-NetTCPConnection (Windows native) - Only listening servers
 if ($Verbose) { Write-DiscoveryLine "Scanning TCP listening servers..." -ForegroundColor Cyan }
@@ -500,21 +553,19 @@ try {
         }
         $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $conn.LocalPort
         $protocol = 'TCP'
-        $note = ""
+        $notes = @()
         
         if ($unifiedResult.connection.status -eq 'success') {
             # Check if HTTP/HTTPS was detected
             if ($unifiedResult.protocol) {
                 $protocol = $unifiedResult.protocol.protocol
-                if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+                if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
             }
             # Check if banner was retrieved
             elseif ($unifiedResult.banner) {
-                $note = "Banner: $($unifiedResult.banner)"
+                $notes = @("Banner: $($unifiedResult.banner)")
             }
         }
-
-        $notes = @($note)
         
         Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
     }
@@ -538,21 +589,19 @@ try {
             }
             $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $port
             $protocol = 'TCP'
-            $note = ""
+            $notes = @()
             
             if ($unifiedResult.connection.status -eq 'success') {
                 # Check if HTTP/HTTPS was detected
                 if ($unifiedResult.protocol) {
                     $protocol = $unifiedResult.protocol.protocol
-                    if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+                    if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
                 }
                 # Check if banner was retrieved
                 elseif ($unifiedResult.banner) {
-                    $note = "Banner: $($unifiedResult.banner)"
+                    $notes = @("Banner: $($unifiedResult.banner)")
                 }
             }
-
-            $notes = @($note)
             
             Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $port -Source 'netstat' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
         }
@@ -577,20 +626,20 @@ try {
                 foreach ($conn in $tcpConnections) {
                     $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $conn.LocalPort
                     $protocol = 'TCP'
-                    $note = ""
+                    $notes = @()
                     
                     if ($unifiedResult.connection.status -eq 'success') {
                         # Check if HTTP/HTTPS was detected
                         if ($unifiedResult.protocol) {
                             $protocol = $unifiedResult.protocol.protocol
-                            if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+                            if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
                         }
                         # Check if banner was retrieved
                         elseif ($unifiedResult.banner) {
-                            $note = "Banner: $($unifiedResult.banner)"
+                            $notes = @("Banner: $($unifiedResult.banner)")
                         }
                     }
-                    $notes = @($note)
+                    
                     Write-ServiceOutput -ServiceName $service.Name -Protocol $protocol -Port $conn.LocalPort -Source 'Windows Service' -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
                 }
             }
@@ -619,20 +668,20 @@ if ($IncludeDocker) {
                         $protocol = $matches[4].ToUpper()
                         $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $hostPort
                         $dockerProtocol = $protocol
-                        $note = ""
+                        $notes = @()
                         
                         if ($unifiedResult.connection.status -eq 'success') {
                             # Check if HTTP/HTTPS was detected
                             if ($unifiedResult.protocol) {
                                 $dockerProtocol = $unifiedResult.protocol.protocol
-                                if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+                                if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
                             }
                             # Check if banner was retrieved
                             elseif ($unifiedResult.banner) {
-                                $note = "Banner: $($unifiedResult.banner)"
+                                $notes = @("Banner: $($unifiedResult.banner)")
                             }
                         }
-                        $notes = @($note)
+                        
                         Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $dockerProtocol -Port $hostPort -Source "Docker" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
                     }
                 }
@@ -656,20 +705,20 @@ if ($IncludeWSL) {
             foreach ($conn in $tcpConnections) {
                 $unifiedResult = Test-ConnectionAndProtocol -Host '127.0.0.1' -Port $conn.LocalPort
                 $protocol = 'TCP'
-                $note = ""
+                $notes = @()
                 
                 if ($unifiedResult.connection.status -eq 'success') {
                     # Check if HTTP/HTTPS was detected
                     if ($unifiedResult.protocol) {
                         $protocol = $unifiedResult.protocol.protocol
-                        if ($unifiedResult.protocol.note) { $note = $unifiedResult.protocol.note }
+                        if ($unifiedResult.protocol.notes) { $notes = $unifiedResult.protocol.notes }
                     }
                     # Check if banner was retrieved
                     elseif ($unifiedResult.banner) {
-                        $note = "Banner: $($unifiedResult.banner)"
+                        $notes = @("Banner: $($unifiedResult.banner)")
                     }
                 }
-                $notes = @($note)
+                
                 Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol $protocol -Port $conn.LocalPort -Source "WSL" -Status $unifiedResult.connection.status -Ping $unifiedResult.connection.ping -Notes $notes
             }
         }
@@ -705,5 +754,6 @@ if ($Verbose) {
     Write-DiscoveryLine "# - Connection caching to avoid duplicate tests" -ForegroundColor Green
     Write-DiscoveryLine "# - Consistent timeouts using \$TimeoutMs parameter (${TimeoutMs}ms)" -ForegroundColor Green
     Write-DiscoveryLine "# - Thread-safe cache operations" -ForegroundColor Green
+    Write-DiscoveryLine "# - Standardized notes handling with proper array management" -ForegroundColor Green
 }
 Read-Host "Press Enter to exit"

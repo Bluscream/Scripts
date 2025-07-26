@@ -1,0 +1,135 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Device Configuration Schema",
+    "description": "Schema for device configuration files in the service discovery system",
+    "type": "object",
+    "required": [
+        "name",
+        "os"
+    ],
+    "definitions": {
+        "service": {
+            "type": "object",
+            "required": [
+                "port",
+                "name"
+            ],
+            "properties": {
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Port number for the service"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Name of the service"
+                },
+                "Description": {
+                    "type": "string",
+                    "description": "Optional description of the service"
+                },
+                "Image": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "URL to an image/icon for the service"
+                },
+                "notes": {
+                    "type": "array",
+                    "description": "Additional notes or information about the service",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        }
+    },
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "The schema version of the device configuration file"
+        },
+        "name": {
+            "type": "string",
+            "description": "The name/identifier of the device"
+        },
+        "os": {
+            "type": "string",
+            "description": "The operating system running on the device"
+        },
+        "ipv4": {
+            "type": "array",
+            "description": "List of IPv4 addresses associated with the device",
+            "items": {
+                "type": "string",
+                "format": "ipv4"
+            }
+        },
+        "ipv6": {
+            "type": "array",
+            "description": "List of IPv6 addresses associated with the device",
+            "items": {
+                "type": "string",
+                "format": "ipv6"
+            }
+        },
+        "macs": {
+            "type": "array",
+            "description": "List of MAC addresses associated with the device",
+            "items": {
+                "type": "string",
+                "format": "mac"
+            }
+        },
+        "ssh": {
+            "type": "array",
+            "description": "SSH services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "vnc": {
+            "type": "array",
+            "description": "VNC services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "rdp": {
+            "type": "array",
+            "description": "RDP services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "http": {
+            "type": "array",
+            "description": "HTTP services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "https": {
+            "type": "array",
+            "description": "HTTPS services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "tcp": {
+            "type": "array",
+            "description": "Other TCP services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        },
+        "udp": {
+            "type": "array",
+            "description": "UDP services running on the device",
+            "items": {
+                "$ref": "#/definitions/service"
+            }
+        }
+    },
+    "additionalProperties": false
+}
