@@ -20,17 +20,22 @@ function Invoke-PipCommand {
     )
     $commands = @(
         "pip",
-        'python -m pip',
-        'python3 -m pip',
-        '."C:\Users\Bluscream\.pyenv\pyenv-win\versions\3.14.0a4\python.exe" -m pip'
+        "python -m pip",
+        "python3 -m pip",
+        "C:\Users\Bluscream\.pyenv\pyenv-win\versions\3.14.0a4\python.exe -m pip"
     )
     foreach ($cmd in $commands) {
         try {
-            $cmdLine = "$cmd $Arguments"
-            Write-Host "Running command: $cmdLine"
-            $output = & $cmdLine 2>&1
-            Write-Host "Output: $output"
-            Write-Host "Last exit code: $LASTEXITCODE" 
+            # Split command and arguments for correct invocation
+            $cmdParts = $cmd -split ' '
+            $exe = $cmdParts[0]
+            $cmdArgs = @()
+            if ($cmdParts.Count -gt 1) {
+                $cmdArgs += $cmdParts[1..($cmdParts.Count - 1)]
+            }
+            $allArgs = $cmdArgs + ($Arguments -split ' ')
+            Write-Verbose "Running command: $exe $($allArgs -join ' ')"
+            $output = & $exe @allArgs 2>&1
             if ($LASTEXITCODE -eq 0 -and $output) {
                 return $output
             }
@@ -63,13 +68,24 @@ function Clear-Pip {
     }
     $allPackages = $pipList | ForEach-Object { $_.Split('==')[0] }
     $unimportantPackages = $allPackages | Where-Object { $_ -and ($_ -notin $packageWhitelist) }
-    foreach ($package in $unimportantPackages) {
+    if ($unimportantPackages.Count -gt 0) {
         try {
-            Invoke-PipCommand -Arguments "uninstall -y $package"
+            Invoke-PipCommand -Arguments ("uninstall -y " + ($unimportantPackages -join ' '))
         }
         catch {
-            Write-Warning "Failed to uninstall package $($package): $_"
+            Write-Warning "Bulk uninstall failed: $_. Attempting to uninstall packages individually."
+            foreach ($package in $unimportantPackages) {
+                try {
+                    Invoke-PipCommand -Arguments "uninstall -y $package"
+                }
+                catch {
+                    Write-Warning "Failed to uninstall package $($package): $_"
+                }
+            }
         }
+    }
+    else {
+        Write-Host "Only important packages remain"
     }
 }
 function Backup-Npm {
