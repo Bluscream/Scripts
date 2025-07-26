@@ -1,7 +1,7 @@
 #!/bin/bash
 # Service Discovery Script for Linux/Unix
 # Discovers running services and their listening ports
-# Output format: <hostname>;<service name>;<protocol>;<port>;<status>;<ping ms>;<source>
+# Output format: <hostname>;<service name>;<protocol>;<port>;<status>;<ping ms>;<source>;<note>
 
 set -euo pipefail
 
@@ -73,8 +73,188 @@ write_discovery_line() {
     echo "$line"
 }
 
-# Cache for connection results to avoid duplicate tests
-declare -A connection_cache
+# Unified cache for all connection and protocol detection results
+declare -A unified_cache
+
+# Function to measure ping time for TCP connections
+test_tcp_port_with_ping() {
+    local host="$1"
+    local port="$2"
+    local cache_key="${host}:${port}"
+    
+    # Check cache first
+    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+        echo "${unified_cache[$cache_key]}"
+        return
+    fi
+    
+    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local start_time
+    local end_time
+    local ping_time
+    local result
+    
+    # Measure connection time
+    start_time=$(date +%s%3N 2>/dev/null || date +%s000)
+    
+    if timeout "$timeout_sec" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
+        result="success"
+    else
+        result="refused"
+    fi
+    
+    end_time=$(date +%s%3N 2>/dev/null || date +%s000)
+    ping_time=$((end_time - start_time))
+    
+    # Cache the result
+    unified_cache[$cache_key]="${result}|${ping_time}"
+    echo "${result}|${ping_time}"
+}
+
+# Function to get TCP banner/MOTD information
+get_tcp_banner() {
+    local host="$1"
+    local port="$2"
+    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local banner=""
+    
+    # Use timeout and nc (netcat) to get banner
+    if command -v nc >/dev/null 2>&1; then
+        banner=$(timeout "$timeout_sec" nc -w "$timeout_sec" "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+    elif command -v telnet >/dev/null 2>&1; then
+        # Fallback to telnet
+        banner=$(timeout "$timeout_sec" telnet "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+    fi
+    
+    echo "$banner"
+}
+
+# Enhanced function to test HTTP/HTTPS with detailed response analysis
+test_http_protocol_enhanced() {
+    local host="$1"
+    local port="$2"
+    local cache_key="http_${host}:${port}"
+    
+    # Check cache first
+    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+        echo "${unified_cache[$cache_key]}"
+        return
+    fi
+    
+    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local result=""
+    local note=""
+    
+    # Test HTTP with curl for detailed response
+    if command -v curl >/dev/null 2>&1; then
+        # Test HTTP
+        local http_response
+        http_response=$(curl -s -m "$timeout_sec" -w "%{http_code}|%{server}|%{powered_by}" "http://$host:$port/" 2>/dev/null || echo "")
+        
+        if [[ -n "$http_response" ]]; then
+            local status_code=$(echo "$http_response" | cut -d'|' -f1)
+            local server_header=$(echo "$http_response" | cut -d'|' -f2)
+            local powered_by=$(echo "$http_response" | cut -d'|' -f3)
+            
+            if [[ "$status_code" =~ ^[0-9]+$ ]] && [[ "$status_code" -ge 100 ]] && [[ "$status_code" -lt 600 ]]; then
+                result="HTTP"
+                note="HTTP $status_code"
+                if [[ -n "$server_header" && "$server_header" != "unknown" ]]; then
+                    note="$note Server:$server_header"
+                fi
+                if [[ -n "$powered_by" && "$powered_by" != "unknown" ]]; then
+                    note="$note PoweredBy:$powered_by"
+                fi
+            fi
+        fi
+        
+        # Test HTTPS if HTTP failed
+        if [[ -z "$result" ]]; then
+            local https_response
+            https_response=$(curl -s -m "$timeout_sec" -k -w "%{http_code}|%{server}|%{powered_by}" "https://$host:$port/" 2>/dev/null || echo "")
+            
+            if [[ -n "$https_response" ]]; then
+                local status_code=$(echo "$https_response" | cut -d'|' -f1)
+                local server_header=$(echo "$https_response" | cut -d'|' -f2)
+                local powered_by=$(echo "$https_response" | cut -d'|' -f3)
+                
+                if [[ "$status_code" =~ ^[0-9]+$ ]] && [[ "$status_code" -ge 100 ]] && [[ "$status_code" -lt 600 ]]; then
+                    result="HTTPS"
+                    note="HTTPS $status_code"
+                    if [[ -n "$server_header" && "$server_header" != "unknown" ]]; then
+                        note="$note Server:$server_header"
+                    fi
+                    if [[ -n "$powered_by" && "$powered_by" != "unknown" ]]; then
+                        note="$note PoweredBy:$powered_by"
+                    fi
+                fi
+            fi
+        fi
+    else
+        # Fallback to wget (less detailed)
+        if wget -q --timeout="$timeout_sec" --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
+            result="HTTP"
+            note="HTTP (wget)"
+        elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
+            result="HTTPS"
+            note="HTTPS (wget)"
+        fi
+    fi
+    
+    # Cache the result
+    unified_cache[$cache_key]="${result}|${note}"
+    echo "${result}|${note}"
+}
+
+# Unified function to test connection and detect protocol
+test_connection_and_protocol() {
+    local host="$1"
+    local port="$2"
+    local cache_key="unified_${host}:${port}"
+    
+    # Check cache first
+    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+        echo "${unified_cache[$cache_key]}"
+        return
+    fi
+    
+    # Test connection first
+    local connection_result
+    connection_result=$(test_tcp_port_with_ping "$host" "$port")
+    local status=$(echo "$connection_result" | cut -d'|' -f1)
+    local ping_time=$(echo "$connection_result" | cut -d'|' -f2)
+    
+    local protocol="TCP"
+    local note=""
+    
+    # If connection successful, test for HTTP/HTTPS and get banner
+    if [[ "$status" == "success" ]]; then
+        # Test for HTTP/HTTPS first
+        local http_result
+        http_result=$(test_http_protocol_enhanced "$host" "$port")
+        local detected_protocol=$(echo "$http_result" | cut -d'|' -f1)
+        local http_note=$(echo "$http_result" | cut -d'|' -f2)
+        
+        if [[ -n "$detected_protocol" ]]; then
+            protocol="$detected_protocol"
+            note="$http_note"
+        else
+            # If not HTTP/HTTPS, try to get banner
+            local banner
+            banner=$(get_tcp_banner "$host" "$port")
+            if [[ -n "$banner" ]]; then
+                note="Banner: $banner"
+            fi
+        fi
+    fi
+    
+    # Create unified result
+    local unified_result="${status}|${ping_time}|${protocol}|${note}"
+    
+    # Cache the result
+    unified_cache[$cache_key]="$unified_result"
+    echo "$unified_result"
+}
 
 # Function to process a single service in parallel
 process_single_service() {
@@ -83,41 +263,16 @@ process_single_service() {
     local port="$3"
     local source="$4"
     
-    # Test TCP connection
-    local tcp_result
-    local timeout_sec=$((TIMEOUT_MS / 1000))
-    if timeout "$timeout_sec" bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
-        tcp_result="success"
-    else
-        tcp_result="refused"
-    fi
+    local unified_result
+    unified_result=$(test_connection_and_protocol "127.0.0.1" "$port")
     
-    # Test HTTP if TCP succeeded
-    local final_protocol="$protocol"
-    if [[ "$tcp_result" == "success" && "$protocol" == "TCP" ]]; then
-        local http_protocol=""
-        local timeout_sec=$((TIMEOUT_MS / 1000))
-        if command -v curl >/dev/null 2>&1; then
-            if curl -s -m "$timeout_sec" "http://127.0.0.1:$port/" >/dev/null 2>&1; then
-                http_protocol="HTTP"
-            elif curl -s -m "$timeout_sec" -k "https://127.0.0.1:$port/" >/dev/null 2>&1; then
-                http_protocol="HTTPS"
-            fi
-        else
-            if wget -q --timeout="$timeout_sec" --tries=1 "http://127.0.0.1:$port/" -O /dev/null 2>/dev/null; then
-                http_protocol="HTTP"
-            elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://127.0.0.1:$port/" -O /dev/null 2>/dev/null; then
-                http_protocol="HTTPS"
-            fi
-        fi
-        
-        if [[ -n "$http_protocol" ]]; then
-            final_protocol="$http_protocol"
-        fi
-    fi
+    local status=$(echo "$unified_result" | cut -d'|' -f1)
+    local ping_time=$(echo "$unified_result" | cut -d'|' -f2)
+    local final_protocol=$(echo "$unified_result" | cut -d'|' -f3)
+    local note=$(echo "$unified_result" | cut -d'|' -f4)
     
     # Output result
-    write_service_output "$service_name" "$final_protocol" "$port" "$tcp_result" "0" "$source"
+    write_service_output "$service_name" "$final_protocol" "$port" "$status" "$ping_time" "$source" "$note"
 }
 
 # Function to process services in parallel batches
@@ -152,95 +307,7 @@ process_services_parallel() {
     wait
 }
 
-# Optimized function to test TCP connectivity with caching
-test_tcp_port() {
-    local host="$1"
-    local port="$2"
-    local cache_key="${host}:${port}"
-    
-    # Check cache first
-    if [[ -n "${connection_cache[$cache_key]}" ]]; then
-        echo "${connection_cache[$cache_key]}"
-        return
-    fi
-    
-    # Test connection with timeout
-    local timeout_sec=$((TIMEOUT_MS / 1000))
-    local result
-    if timeout "$timeout_sec" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
-        result="success"
-    else
-        result="refused"
-    fi
-    
-    # Cache the result
-    connection_cache[$cache_key]="$result"
-    echo "$result"
-}
-
-# Optimized function to test HTTP/HTTPS with caching
-test_http_protocol() {
-    local host="$1"
-    local port="$2"
-    local cache_key="http_${host}:${port}"
-    
-    # Check cache first
-    if [[ -n "${connection_cache[$cache_key]}" ]]; then
-        echo "${connection_cache[$cache_key]}"
-        return
-    fi
-    
-    local result=""
-    
-    # Test HTTP with curl (faster than wget)
-    local timeout_sec=$((TIMEOUT_MS / 1000))
-    if command -v curl >/dev/null 2>&1; then
-        if curl -s -m "$timeout_sec" "http://$host:$port/" >/dev/null 2>&1; then
-            result="HTTP"
-        elif curl -s -m "$timeout_sec" -k "https://$host:$port/" >/dev/null 2>&1; then
-            result="HTTPS"
-        fi
-    else
-        # Fallback to wget
-        if wget -q --timeout="$timeout_sec" --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
-            result="HTTP"
-        elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
-            result="HTTPS"
-        fi
-    fi
-    
-    # Cache the result
-    connection_cache[$cache_key]="$result"
-    echo "$result"
-}
-
-# Optimized function to write service output with connection testing
-write_service_output_optimized() {
-    local service_name="$1"
-    local protocol="$2"
-    local port="$3"
-    local source="$4"
-    
-    # Only test TCP connections (skip UDP)
-    if [[ "$protocol" == "TCP" ]]; then
-        local tcp_result
-        tcp_result=$(test_tcp_port "127.0.0.1" "$port")
-        
-        if [[ "$tcp_result" == "success" ]]; then
-            local http_protocol
-            http_protocol=$(test_http_protocol "127.0.0.1" "$port")
-            if [[ -n "$http_protocol" ]]; then
-                protocol="$http_protocol"
-            fi
-        fi
-        
-        write_service_output "$service_name" "$protocol" "$port" "$tcp_result" "0" "$source"
-    else
-        write_service_output "$service_name" "$protocol" "$port" "Listening" "0" "$source"
-    fi
-}
-
-# Function to write output in required format
+# Function to write output in required format (updated to include note field)
 write_service_output() {
     local service_name="$1"
     local protocol="$2"
@@ -248,7 +315,12 @@ write_service_output() {
     local status="$4"
     local ping="$5"
     local source="$6"
-    write_discovery_line "$HOSTNAME;$service_name;$protocol;$port;$status;$ping;$source"
+    local note="${7:-}"
+    
+    # Clean up note field (remove newlines and extra spaces)
+    note=$(echo "$note" | tr '\n\r' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    write_discovery_line "$HOSTNAME;$service_name;$protocol;$port;$status;$ping;$source;$note"
 }
 
 # Function to get service name from port
@@ -309,9 +381,11 @@ get_process_name() {
 
 write_discovery_line "# Service Discovery Results"
 write_discovery_line "# Generated at $(date)"
-write_discovery_line "# hostname;$HOSTNAME_IPV4;$HOSTNAME_IPV6"
 write_discovery_line ""
-write_discovery_line "# hostname;service name;protocol;port;status;ping ms;source"
+write_discovery_line "# hostname;ipv4s;ipv6s"
+write_discovery_line "# $HOSTNAME;$HOSTNAME_IPV4;$HOSTNAME_IPV6"
+write_discovery_line ""
+write_discovery_line "# hostname;service name;protocol;port;status;ping ms;source;note"
 
 # Method 1: lsof (most comprehensive) - Only listening servers
 if [[ "$VERBOSE" == "true" ]]; then
@@ -334,7 +408,7 @@ if command -v lsof >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output_optimized "$process_name" "TCP" "$port" "lsof"
+                process_single_service "$process_name" "TCP" "$port" "lsof"
             fi
         fi
     done
@@ -354,7 +428,7 @@ if command -v lsof >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output_optimized "$process_name" "UDP" "$port" "lsof"
+                process_single_service "$process_name" "UDP" "$port" "lsof"
             fi
         fi
     done
@@ -380,7 +454,7 @@ if command -v ss >/dev/null 2>&1; then
                     if [[ "$process_name" == "Unknown" ]]; then
                         process_name=$(get_service_name_from_port "$port")
                     fi
-                    write_service_output_optimized "$process_name" "TCP" "$port" "ss"
+                    process_single_service "$process_name" "TCP" "$port" "ss"
                 fi
             fi
         fi
@@ -407,7 +481,7 @@ if command -v netstat >/dev/null 2>&1; then
                 if [[ "$process_name" == "Unknown" ]]; then
                     process_name=$(get_service_name_from_port "$port")
                 fi
-                write_service_output_optimized "$process_name" "TCP" "$port" "netstat"
+                process_single_service "$process_name" "TCP" "$port" "netstat"
             fi
         fi
     done
@@ -429,7 +503,7 @@ if [[ "$INCLUDE_DOCKER" == "true" ]]; then
                 while [[ $ports =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)->([0-9]+)/([[:alpha:]]+) ]]; do
                     host_port="${BASH_REMATCH[2]}"
                     protocol="${BASH_REMATCH[4]}"
-                    write_service_output_optimized "Docker-$container_name" "${protocol^^}" "$host_port" "docker"
+                    process_single_service "Docker-$container_name" "${protocol^^}" "$host_port" "docker"
                     # Remove the matched part to find more ports
                     ports="${ports#*${BASH_REMATCH[0]}}"
                 done
@@ -456,7 +530,7 @@ if [[ "$INCLUDE_SYSTEMD" == "true" ]]; then
                         lsof -iTCP -sTCP:LISTEN -p "$service_pid" -n -P 2>/dev/null | tail -n +2 | while read -r lsof_line; do
                             if [[ $lsof_line =~ :([0-9]+)$ ]]; then
                                 port="${BASH_REMATCH[1]}"
-                                write_service_output_optimized "$service_name" "TCP" "$port" "systemd"
+                                process_single_service "$service_name" "TCP" "$port" "systemd"
                             fi
                         done
                     fi
@@ -485,7 +559,7 @@ if command -v kubectl >/dev/null 2>&1; then
                 if [[ $ports =~ ([0-9]+):([0-9]+)/([[:alpha:]]+) ]]; then
                     node_port="${BASH_REMATCH[2]}"
                     protocol="${BASH_REMATCH[3]}"
-                    write_service_output_optimized "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "kubernetes"
+                    process_single_service "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "kubernetes"
                 fi
             fi
         fi
@@ -499,5 +573,8 @@ if [[ "$VERBOSE" == "true" ]]; then
     write_discovery_line "# - Parallel processing with $MAX_PARALLEL_JOBS concurrent jobs"
     write_discovery_line "# - Connection caching to avoid duplicate tests"
     write_discovery_line "# - Consistent timeouts using TIMEOUT_MS parameter (${TIMEOUT_MS}ms)"
-    write_discovery_line "# - Fast HTTP detection with curl"
+    write_discovery_line "# - Enhanced HTTP/HTTPS detection with detailed response analysis"
+    write_discovery_line "# - TCP banner grabbing for non-HTTP services"
+    write_discovery_line "# - Ping time measurement for connection latency"
+    write_discovery_line "# - Note field for additional service information"
 fi
