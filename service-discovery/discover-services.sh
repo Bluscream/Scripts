@@ -13,37 +13,55 @@ VERBOSE=${VERBOSE:-false}
 # Get hostname
 HOSTNAME=$(hostname)
 
-# Get all local IP addresses
+# Get all local IP addresses (IPv4 and IPv6)
 get_local_ips() {
-    local ips=()
+    local ipv4s=()
+    local ipv6s=()
     
     # Try different methods to get local IPs
     if command -v ip >/dev/null 2>&1; then
-        # Modern Linux systems
+        # Modern Linux systems - IPv4
         while IFS= read -r ip; do
             if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$ip" != "127.0.0.1" ]] && [[ "$ip" != "169.254."* ]]; then
-                ips+=("$ip")
+                ipv4s+=("$ip")
             fi
         done < <(ip -4 addr show | grep -oP 'inet \K\S+' | cut -d'/' -f1)
+        
+        # Modern Linux systems - IPv6
+        while IFS= read -r ip; do
+            if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip" != "::1" ]] && [[ "$ip" != "fe80:"* ]]; then
+                ipv6s+=("$ip")
+            fi
+        done < <(ip -6 addr show | grep -oP 'inet6 \K\S+' | cut -d'/' -f1)
     elif command -v ifconfig >/dev/null 2>&1; then
-        # Traditional Unix systems
+        # Traditional Unix systems - IPv4
         while IFS= read -r ip; do
             if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$ip" != "127.0.0.1" ]] && [[ "$ip" != "169.254."* ]]; then
-                ips+=("$ip")
+                ipv4s+=("$ip")
             fi
         done < <(ifconfig | grep -oP 'inet \K\S+' | cut -d' ' -f1)
+        
+        # Traditional Unix systems - IPv6
+        while IFS= read -r ip; do
+            if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip" != "::1" ]] && [[ "$ip" != "fe80:"* ]]; then
+                ipv6s+=("$ip")
+            fi
+        done < <(ifconfig | grep -oP 'inet6 \K\S+' | cut -d' ' -f1)
     fi
     
     # If no IPs found, use hostname
-    if [[ ${#ips[@]} -eq 0 ]]; then
-        ips=("$HOSTNAME")
+    if [[ ${#ipv4s[@]} -eq 0 ]]; then
+        ipv4s=("$HOSTNAME")
     fi
     
-    # Return comma-separated list
-    printf '%s' "$(IFS=,; echo "${ips[*]}")"
+    # Return comma-separated lists
+    printf '%s|%s' "$(IFS=,; echo "${ipv4s[*]}")" "$(IFS=,; echo "${ipv6s[*]}")"
 }
 
-HOSTNAME=$(get_local_ips)
+IP_INFO=$(get_local_ips)
+HOSTNAME_IPV4=$(echo "$IP_INFO" | cut -d'|' -f1)
+HOSTNAME_IPV6=$(echo "$IP_INFO" | cut -d'|' -f2)
+
 LOGFILE="${TMPDIR:-/tmp}/discovery.log"
 
 # Helper function to write to both stdout and log file
@@ -68,7 +86,7 @@ write_service_output() {
     else
         out_proto="$protocol"
     fi
-    write_discovery_line "$HOSTNAME;$service_name;$out_proto;$port;$status;$ping;$source"
+    write_discovery_line "$service_name;$out_proto;$port;$status;$ping;$source"
 }
 
 # Function to get service name from port
@@ -127,17 +145,19 @@ get_process_name() {
     fi
 }
 
-write_discovery_line "# Service Discovery Results for $HOSTNAME"
+write_discovery_line "# Service Discovery Results"
 write_discovery_line "# Generated at $(date)"
+write_discovery_line "# hostname;$HOSTNAME_IPV4;$HOSTNAME_IPV6"
 write_discovery_line ""
+write_discovery_line "# service name;protocol;port;status;ping ms;source"
 
-# Method 1: lsof (most comprehensive)
+# Method 1: lsof (most comprehensive) - Only listening servers
 if [[ "$VERBOSE" == "true" ]]; then
-    write_discovery_line "Scanning with lsof..."
+    write_discovery_line "Scanning with lsof (listening servers only)..."
 fi
 
 if command -v lsof >/dev/null 2>&1; then
-    # TCP connections
+    # TCP connections - only LISTENING state
     lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null | tail -n +2 | while read -r line; do
         if [[ $line =~ ([[:space:]]+)([0-9]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+:[0-9]+) ]]; then
             pid="${BASH_REMATCH[2]}"
@@ -157,8 +177,8 @@ if command -v lsof >/dev/null 2>&1; then
         fi
     done
     
-    # UDP connections
-    lsof -iUDP -n -P 2>/dev/null | tail -n +2 | while read -r line; do
+    # UDP connections - only listening servers
+    lsof -iUDP -sUDP:IDLE -n -P 2>/dev/null | tail -n +2 | while read -r line; do
         if [[ $line =~ ([[:space:]]+)([0-9]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+:[0-9]+) ]]; then
             pid="${BASH_REMATCH[2]}"
             process_name="${BASH_REMATCH[4]}"
@@ -178,13 +198,13 @@ if command -v lsof >/dev/null 2>&1; then
     done
 fi
 
-# Method 2: ss (modern alternative to netstat)
+# Method 2: ss (modern alternative to netstat) - Only listening servers
 if [[ "$VERBOSE" == "true" ]]; then
-    write_discovery_line "Scanning with ss..."
+    write_discovery_line "Scanning with ss (listening servers only)..."
 fi
 
 if command -v ss >/dev/null 2>&1; then
-    # TCP connections
+    # TCP connections - only LISTEN state
     ss -tlnp 2>/dev/null | tail -n +2 | while read -r line; do
         if [[ $line =~ ([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
             local_address="${BASH_REMATCH[4]}"
@@ -205,9 +225,9 @@ if command -v ss >/dev/null 2>&1; then
     done
 fi
 
-# Method 3: netstat (fallback)
+# Method 3: netstat (fallback) - Only listening servers
 if [[ "$VERBOSE" == "true" ]]; then
-    write_discovery_line "Scanning with netstat..."
+    write_discovery_line "Scanning with netstat (listening servers only)..."
 fi
 
 if command -v netstat >/dev/null 2>&1; then
@@ -231,10 +251,10 @@ if command -v netstat >/dev/null 2>&1; then
     done
 fi
 
-# Method 4: Docker containers
+# Method 4: Docker containers - Only exposed ports (server ports)
 if [[ "$INCLUDE_DOCKER" == "true" ]]; then
     if [[ "$VERBOSE" == "true" ]]; then
-        write_discovery_line "Scanning Docker containers..."
+        write_discovery_line "Scanning Docker containers (exposed server ports only)..."
     fi
     
     if command -v docker >/dev/null 2>&1; then
@@ -243,7 +263,7 @@ if [[ "$INCLUDE_DOCKER" == "true" ]]; then
                 container_name="${BASH_REMATCH[1]}"
                 ports="${BASH_REMATCH[2]}"
                 
-                # Parse port mappings like "0.0.0.0:8080->80/tcp"
+                # Parse port mappings like "0.0.0.0:8080->80/tcp" (only exposed server ports)
                 while [[ $ports =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)->([0-9]+)/([[:alpha:]]+) ]]; do
                     host_port="${BASH_REMATCH[2]}"
                     protocol="${BASH_REMATCH[4]}"
@@ -256,10 +276,10 @@ if [[ "$INCLUDE_DOCKER" == "true" ]]; then
     fi
 fi
 
-# Method 5: systemd services
+# Method 5: systemd services - Only services that are actually listening
 if [[ "$INCLUDE_SYSTEMD" == "true" ]]; then
     if [[ "$VERBOSE" == "true" ]]; then
-        write_discovery_line "Scanning systemd services..."
+        write_discovery_line "Scanning systemd services (listening servers only)..."
     fi
     
     if command -v systemctl >/dev/null 2>&1; then
@@ -284,9 +304,9 @@ if [[ "$INCLUDE_SYSTEMD" == "true" ]]; then
     fi
 fi
 
-# Method 6: Check for Kubernetes services (if kubectl is available)
+# Method 6: Check for Kubernetes services (if kubectl is available) - Only NodePort/LoadBalancer services
 if [[ "$VERBOSE" == "true" ]]; then
-    write_discovery_line "Scanning Kubernetes services..."
+    write_discovery_line "Scanning Kubernetes services (NodePort/LoadBalancer only)..."
 fi
 
 if command -v kubectl >/dev/null 2>&1; then
@@ -294,13 +314,17 @@ if command -v kubectl >/dev/null 2>&1; then
         if [[ $line =~ ([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
             namespace="${BASH_REMATCH[1]}"
             service_name="${BASH_REMATCH[2]}"
+            service_type="${BASH_REMATCH[3]}"
             ports="${BASH_REMATCH[5]}"
             
-            # Parse port mappings like "80:30000/TCP"
-            if [[ $ports =~ ([0-9]+):([0-9]+)/([[:alpha:]]+) ]]; then
-                node_port="${BASH_REMATCH[2]}"
-                protocol="${BASH_REMATCH[3]}"
-                write_service_output "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "Listening" "0" "kubernetes" ""
+            # Only include NodePort and LoadBalancer services (actual server ports)
+            if [[ "$service_type" == "NodePort" || "$service_type" == "LoadBalancer" ]]; then
+                # Parse port mappings like "80:30000/TCP"
+                if [[ $ports =~ ([0-9]+):([0-9]+)/([[:alpha:]]+) ]]; then
+                    node_port="${BASH_REMATCH[2]}"
+                    protocol="${BASH_REMATCH[3]}"
+                    write_service_output "K8s-$namespace-$service_name" "${protocol^^}" "$node_port" "Listening" "0" "kubernetes" ""
+                fi
             fi
         fi
     done

@@ -11,18 +11,19 @@ param(
 # Get hostname
 $hostname = [System.Net.Dns]::GetHostName()
 
-# Get all local IP addresses
-$localIPs = @()
+# Get all local IP addresses (IPv4 and IPv6)
+$localIPv4s = @()
+$localIPv6s = @()
 try {
-    $networkInterfaces = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -notlike "127.*" }
-    $localIPs = $networkInterfaces.IPAddress | Sort-Object -Unique
+    $networkInterfaces = Get-NetIPAddress -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "::1" -and $_.IPAddress -notlike "fe80:*" }
+    $localIPv4s = $networkInterfaces | Where-Object { $_.AddressFamily -eq "IPv4" } | ForEach-Object { $_.IPAddress } | Sort-Object -Unique
+    $localIPv6s = $networkInterfaces | Where-Object { $_.AddressFamily -eq "IPv6" } | ForEach-Object { $_.IPAddress } | Sort-Object -Unique
 }
 catch {
     # Fallback to hostname if IP detection fails
-    $localIPs = @($hostname)
+    $localIPv4s = @($hostname)
+    $localIPv6s = @()
 }
-
-$hostname = $localIPs -join ","
 
 # Helper function to write to both stdout and log file
 function Write-DiscoveryLine {
@@ -161,16 +162,19 @@ function Test-HttpProtocol {
     return $null
 }
 
-Write-DiscoveryLine "# Service Discovery Results for $hostname" -ForegroundColor Yellow
-Write-DiscoveryLine "# Generated at $(Get-Date)" -ForegroundColor Yellow
+Write-DiscoveryLine "# Service Discovery Results"
+Write-DiscoveryLine "# Generated at $(Get-Date)"
 Write-DiscoveryLine ""
-Write-DiscoveryLine "# hostname;service name;protocol;port;status;ping ms;source" -ForegroundColor Green
+Write-DiscoveryLine "# hostname;ipv4s;ipv6s"
+Write-DiscoveryLine "# hostname;service name;protocol;port;status;ping ms;source"
+Write-DiscoveryLine ""
+Write-DiscoveryLine "#hostname;service name;protocol;port;status;ping ms;source"
 
 
-# Method 1: Get-NetTCPConnection (Windows native)
-if ($Verbose) { Write-DiscoveryLine "Scanning TCP connections..." -ForegroundColor Cyan }
+# Method 1: Get-NetTCPConnection (Windows native) - Only listening servers
+if ($Verbose) { Write-DiscoveryLine "Scanning TCP listening servers..." -ForegroundColor Cyan }
 try {
-    $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ne 0 }
+    $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ne 0 -and $_.State -eq "Listen" }
     
     foreach ($conn in $tcpConnections) {
         $serviceName = Get-ServiceNameFromProcess -ProcessId $conn.OwningProcess
@@ -186,8 +190,8 @@ catch {
     if ($Verbose) { Write-DiscoveryLine "Get-NetTCPConnection failed: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
-# Method 2: netstat (fallback)
-if ($Verbose) { Write-DiscoveryLine "Scanning with netstat..." -ForegroundColor Cyan }
+# Method 2: netstat (fallback) - Only listening servers
+if ($Verbose) { Write-DiscoveryLine "Scanning with netstat (listening only)..." -ForegroundColor Cyan }
 try {
     $netstatOutput = netstat -an | Select-String "LISTENING"
     
@@ -209,8 +213,8 @@ catch {
     if ($Verbose) { Write-DiscoveryLine "netstat failed: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
-# Method 3: Get Windows Services
-if ($Verbose) { Write-DiscoveryLine "Scanning Windows Services..." -ForegroundColor Cyan }
+# Method 3: Get Windows Services - Only services that are actually listening
+if ($Verbose) { Write-DiscoveryLine "Scanning Windows Services (listening only)..." -ForegroundColor Cyan }
 try {
     $services = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" }
     
@@ -218,7 +222,7 @@ try {
         # Try to find if the service is listening on any port
         $serviceProcess = Get-WmiObject -Class Win32_Service -Filter "Name='$($service.Name)'" -ErrorAction SilentlyContinue
         if ($serviceProcess -and $serviceProcess.ProcessId) {
-            $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $serviceProcess.ProcessId }
+            $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $serviceProcess.ProcessId -and $_.State -eq "Listen" }
             
             if ($tcpConnections) {
                 foreach ($conn in $tcpConnections) {
@@ -234,9 +238,9 @@ catch {
     if ($Verbose) { Write-DiscoveryLine "Windows Services scan failed: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
-# Method 4: Docker containers (if Docker is available)
+# Method 4: Docker containers (if Docker is available) - Only exposed ports
 if ($IncludeDocker) {
-    if ($Verbose) { Write-DiscoveryLine "Scanning Docker containers..." -ForegroundColor Cyan }
+    if ($Verbose) { Write-DiscoveryLine "Scanning Docker containers (exposed ports only)..." -ForegroundColor Cyan }
     try {
         $dockerPs = docker ps --format "table {{.Names}}\t{{.Ports}}" 2>$null
         if ($dockerPs) {
@@ -245,7 +249,7 @@ if ($IncludeDocker) {
                     $containerName = $matches[1]
                     $ports = $matches[2]
                     
-                    # Parse port mappings like "0.0.0.0:8080->80/tcp"
+                    # Parse port mappings like "0.0.0.0:8080->80/tcp" (only exposed ports)
                     if ($ports -match "(\d+\.\d+\.\d+\.\d+):(\d+)->(\d+)/(\w+)") {
                         $hostPort = $matches[2]
                         $containerPort = $matches[3]
@@ -263,14 +267,14 @@ if ($IncludeDocker) {
     }
 }
 
-# Method 5: WSL processes (if WSL is available)
+# Method 5: WSL processes (if WSL is available) - Only listening servers
 if ($IncludeWSL) {
-    if ($Verbose) { Write-DiscoveryLine "Scanning WSL processes..." -ForegroundColor Cyan }
+    if ($Verbose) { Write-DiscoveryLine "Scanning WSL processes (listening only)..." -ForegroundColor Cyan }
     try {
         $wslProcesses = Get-Process | Where-Object { $_.ProcessName -like "*wsl*" -or $_.ProcessName -like "*ubuntu*" -or $_.ProcessName -like "*debian*" }
         
         foreach ($process in $wslProcesses) {
-            $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $process.Id }
+            $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $process.Id -and $_.State -eq "Listen" }
             
             foreach ($conn in $tcpConnections) {
                 $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
@@ -284,8 +288,8 @@ if ($IncludeWSL) {
     }
 }
 
-# Method 6: Check for UDP services (less common but important)
-if ($Verbose) { Write-DiscoveryLine "Scanning UDP services..." -ForegroundColor Cyan }
+# Method 6: Check for UDP services (less common but important) - Only listening servers
+if ($Verbose) { Write-DiscoveryLine "Scanning UDP listening servers..." -ForegroundColor Cyan }
 try {
     $udpConnections = Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ne 0 }
     
