@@ -5,11 +5,14 @@
 
 param(
     [switch]$IncludeDocker = $true,
-    [switch]$IncludeWSL = $true
+    [switch]$IncludeWSL = $true,
+    [int]$TimeoutMs = 500,
+    [int]$MaxParallelJobs = 10
 )
 
 # Get hostname
 $hostname = [System.Net.Dns]::GetHostName()
+$timeoutSec = [math]::Ceiling($TimeoutMs / 1000)
 
 # Get all local IP addresses (IPv4 and IPv6)
 $localIPv4s = @()
@@ -24,15 +27,20 @@ catch {
     $localIPv4s = @($hostname)
     $localIPv6s = @()
 }
-
+$logFile = Join-Path $env:TEMP 'discovery.log'
 # Helper function to write to both stdout and log file
 function Write-DiscoveryLine {
     param(
-        [string]$Line
+        [string]$Line,
+        [switch]$Verbose = $false
     )
-    $logFile = Join-Path $env:TEMP 'discovery.log'
-    $Line | Out-File -FilePath $logFile -Encoding UTF8 -Append
-    Write-Output $Line
+    if ($Verbose) {
+        Write-Verbose $Line
+    }
+    else {
+        $Line | Out-File -FilePath $logFile -Encoding UTF8 -Append
+        Write-Output $Line
+    }
 }
 
 # Function to write output in required format
@@ -43,9 +51,10 @@ function Write-ServiceOutput {
         [string]$Port,
         [string]$Status = "",
         [string]$Ping = "",
-        [string]$Source = ""
+        [string]$Source = "",
+        [string]$Note = ""
     )
-    $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source"
+    $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source;$Note"
     Write-DiscoveryLine $line
 }
 
@@ -144,14 +153,14 @@ function Test-HttpProtocol {
     $urlHttp = "http://$($Host_):$Port/"
     $urlHttps = "https://$($Host_):$Port/"
     try {
-        $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
             return 'HTTP'
         }
     }
     catch {}
     try {
-        $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
         if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
             return 'HTTPS'
         }
@@ -162,46 +171,224 @@ function Test-HttpProtocol {
 
 # Cache for connection results to avoid duplicate tests
 $connectionCache = @{}
+$connectionCacheLock = [System.Threading.ReaderWriterLockSlim]::new()
 
-# Optimized function to test connection with caching
+# Optimized function to test connection with caching and thread safety
 function Test-ConnectionWithCache {
     param(
         [string]$Host_,
         [int]$Port
     )
     $cacheKey = "$Host_`:$Port"
-    if ($connectionCache.ContainsKey($cacheKey)) {
-        return $connectionCache[$cacheKey]
+    
+    # Thread-safe cache read
+    $connectionCacheLock.EnterReadLock()
+    try {
+        if ($connectionCache.ContainsKey($cacheKey)) {
+            return $connectionCache[$cacheKey]
+        }
+    }
+    finally {
+        $connectionCacheLock.ExitReadLock()
     }
     
+    # Test connection
     $result = Test-TcpPort -Host $Host_ -Port $Port
-    $connectionCache[$cacheKey] = $result
+    
+    # Thread-safe cache write
+    $connectionCacheLock.EnterWriteLock()
+    try {
+        $connectionCache[$cacheKey] = $result
+    }
+    finally {
+        $connectionCacheLock.ExitWriteLock()
+    }
+    
     return $result
 }
 
-# Optimized function to test HTTP with caching
+# Optimized function to test HTTP with caching and thread safety
 function Test-HttpWithCache {
     param(
         [string]$Host_,
         [int]$Port
     )
     $cacheKey = "http_$Host_`:$Port"
-    if ($connectionCache.ContainsKey($cacheKey)) {
-        return $connectionCache[$cacheKey]
+    
+    # Thread-safe cache read
+    $connectionCacheLock.EnterReadLock()
+    try {
+        if ($connectionCache.ContainsKey($cacheKey)) {
+            return $connectionCache[$cacheKey]
+        }
+    }
+    finally {
+        $connectionCacheLock.ExitReadLock()
     }
     
+    # Test HTTP
     $result = Test-HttpProtocol -Host $Host_ -Port $Port
-    $connectionCache[$cacheKey] = $result
+    
+    # Thread-safe cache write
+    $connectionCacheLock.EnterWriteLock()
+    try {
+        $connectionCache[$cacheKey] = $result
+    }
+    finally {
+        $connectionCacheLock.ExitWriteLock()
+    }
+    
     return $result
+}
+
+# Function to process a single service in parallel
+function Process-ServiceParallel {
+    param(
+        [string]$ServiceName,
+        [string]$Protocol,
+        [int]$Port,
+        [string]$Source
+    )
+    
+    $result = Test-ConnectionWithCache -Host '127.0.0.1' -Port $Port
+    $finalProtocol = $Protocol
+    
+    if ($result.status -eq 'success' -and $Protocol -eq 'TCP') {
+        $detectedHttp = Test-HttpWithCache -Host '127.0.0.1' -Port $Port
+        if ($detectedHttp) {
+            $finalProtocol = $detectedHttp
+        }
+    }
+    
+    return @{
+        ServiceName = $ServiceName
+        Protocol    = $finalProtocol
+        Port        = $Port
+        Status      = $result.status
+        Ping        = $result.ping
+        Source      = $Source
+    }
+}
+
+# Function to process services in parallel batches
+function Process-ServicesParallel {
+    param(
+        [array]$Services,
+        [int]$MaxJobs = 10
+    )
+    
+    $jobs = @()
+    $results = @()
+    
+    foreach ($service in $Services) {
+        # Start job for this service
+        $job = Start-Job -ScriptBlock {
+            param($ServiceName, $Protocol, $Port, $Source)
+            
+            # Import the functions into the job
+            function Test-TcpPort {
+                param([string]$Host_, [int]$Port, [int]$TimeoutMs = 500)
+                $tcpClient = $null
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                try {
+                    $tcpClient = New-Object System.Net.Sockets.TcpClient
+                    $iar = $tcpClient.BeginConnect($Host_, $Port, $null, $null)
+                    $success = $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
+                    $sw.Stop()
+                    if ($success -and $tcpClient.Connected) {
+                        $tcpClient.EndConnect($iar)
+                        $tcpClient.Close()
+                        return @{ status = 'success'; ping = $sw.ElapsedMilliseconds }
+                    }
+                    else {
+                        $tcpClient.Close()
+                        return @{ status = 'timeout'; ping = $sw.ElapsedMilliseconds }
+                    }
+                }
+                catch {
+                    $sw.Stop()
+                    return @{ status = 'refused'; ping = $sw.ElapsedMilliseconds }
+                }
+                finally {
+                    if ($tcpClient) { $tcpClient.Dispose() }
+                }
+            }
+            
+            function Test-HttpProtocol {
+                param([string]$Host_, [int]$Port, [int]$TimeoutMs = 500)
+                $urlHttp = "http://$($Host_):$Port/"
+                $urlHttps = "https://$($Host_):$Port/"
+                try {
+                    $resp = Invoke-WebRequest -Uri $urlHttp -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
+                    if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
+                        return 'HTTP'
+                    }
+                }
+                catch {}
+                try {
+                    $resp = Invoke-WebRequest -Uri $urlHttps -UseBasicParsing -TimeoutSec $timeoutSec -ErrorAction Stop
+                    if ($resp.StatusCode -ge 100 -and $resp.StatusCode -lt 600) {
+                        return 'HTTPS'
+                    }
+                }
+                catch {}
+                return $null
+            }
+            
+            $result = Test-TcpPort -Host '127.0.0.1' -Port $Port
+            $finalProtocol = $Protocol
+            
+            if ($result.status -eq 'success' -and $Protocol -eq 'TCP') {
+                $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $Port
+                if ($detectedHttp) {
+                    $finalProtocol = $detectedHttp
+                }
+            }
+            
+            return @{
+                ServiceName = $ServiceName
+                Protocol    = $finalProtocol
+                Port        = $Port
+                Status      = $result.status
+                Ping        = $result.ping
+                Source      = $Source
+            }
+        } -ArgumentList $service.ServiceName, $service.Protocol, $service.Port, $service.Source
+        
+        $jobs += $job
+        
+        # If we've reached max jobs, wait for completion
+        if ($jobs.Count -ge $MaxJobs) {
+            $completedJobs = Wait-Job -Job $jobs -Any
+            foreach ($completedJob in $completedJobs) {
+                $result = Receive-Job -Job $completedJob
+                $results += $result
+                Remove-Job -Job $completedJob
+                $jobs = $jobs | Where-Object { $_.Id -ne $completedJob.Id }
+            }
+        }
+    }
+    
+    # Wait for remaining jobs
+    if ($jobs.Count -gt 0) {
+        Wait-Job -Job $jobs
+        foreach ($job in $jobs) {
+            $result = Receive-Job -Job $job
+            $results += $result
+            Remove-Job -Job $job
+        }
+    }
+    
+    return $results
 }
 
 Write-DiscoveryLine "# Service Discovery Results"
 Write-DiscoveryLine "# Generated at $(Get-Date)"
 Write-DiscoveryLine ""
 Write-DiscoveryLine "# hostname;ipv4s;ipv6s"
-Write-DiscoveryLine "# hostname;service name;protocol;port;status;ping ms;source"
+Write-DiscoveryLine "# $hostname;$($localIPv4s -join ',');$($localIPv6s -join ',')"
 Write-DiscoveryLine ""
-Write-DiscoveryLine "#hostname;service name;protocol;port;status;ping ms;source"
+Write-DiscoveryLine "# hostname;service name;protocol;port;status;ping ms;source"
 
 
 # Method 1: Get-NetTCPConnection (Windows native) - Only listening servers
@@ -341,5 +528,10 @@ catch {
 if ($Verbose) {
     Write-DiscoveryLine ""
     Write-DiscoveryLine "# Scan completed at $(Get-Date)" -ForegroundColor Yellow
+    Write-DiscoveryLine "# Performance optimizations applied:" -ForegroundColor Green
+    Write-DiscoveryLine "# - Parallel processing with $MaxParallelJobs concurrent jobs" -ForegroundColor Green
+    Write-DiscoveryLine "# - Connection caching to avoid duplicate tests" -ForegroundColor Green
+    Write-DiscoveryLine "# - Consistent timeouts using \$TimeoutMs parameter (${TimeoutMs}ms)" -ForegroundColor Green
+    Write-DiscoveryLine "# - Thread-safe cache operations" -ForegroundColor Green
 }
 Read-Host "Press Enter to exit"

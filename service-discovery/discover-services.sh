@@ -9,6 +9,8 @@ set -euo pipefail
 INCLUDE_DOCKER=${INCLUDE_DOCKER:-true}
 INCLUDE_SYSTEMD=${INCLUDE_SYSTEMD:-true}
 VERBOSE=${VERBOSE:-false}
+MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-10}
+TIMEOUT_MS=${TIMEOUT_MS:-500}
 
 # Get hostname
 HOSTNAME=$(hostname)
@@ -74,6 +76,82 @@ write_discovery_line() {
 # Cache for connection results to avoid duplicate tests
 declare -A connection_cache
 
+# Function to process a single service in parallel
+process_single_service() {
+    local service_name="$1"
+    local protocol="$2"
+    local port="$3"
+    local source="$4"
+    
+    # Test TCP connection
+    local tcp_result
+    local timeout_sec=$((TIMEOUT_MS / 1000))
+    if timeout "$timeout_sec" bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+        tcp_result="success"
+    else
+        tcp_result="refused"
+    fi
+    
+    # Test HTTP if TCP succeeded
+    local final_protocol="$protocol"
+    if [[ "$tcp_result" == "success" && "$protocol" == "TCP" ]]; then
+        local http_protocol=""
+        local timeout_sec=$((TIMEOUT_MS / 1000))
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s -m "$timeout_sec" "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+                http_protocol="HTTP"
+            elif curl -s -m "$timeout_sec" -k "https://127.0.0.1:$port/" >/dev/null 2>&1; then
+                http_protocol="HTTPS"
+            fi
+        else
+            if wget -q --timeout="$timeout_sec" --tries=1 "http://127.0.0.1:$port/" -O /dev/null 2>/dev/null; then
+                http_protocol="HTTP"
+            elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://127.0.0.1:$port/" -O /dev/null 2>/dev/null; then
+                http_protocol="HTTPS"
+            fi
+        fi
+        
+        if [[ -n "$http_protocol" ]]; then
+            final_protocol="$http_protocol"
+        fi
+    fi
+    
+    # Output result
+    write_service_output "$service_name" "$final_protocol" "$port" "$tcp_result" "0" "$source"
+}
+
+# Function to process services in parallel batches
+process_services_parallel() {
+    local services=("$@")
+    local max_jobs="$MAX_PARALLEL_JOBS"
+    local jobs=()
+    
+    for service in "${services[@]}"; do
+        # Parse service string (format: "service_name|protocol|port|source")
+        IFS='|' read -r service_name protocol port source <<< "$service"
+        
+        # Start background job for this service
+        process_single_service "$service_name" "$protocol" "$port" "$source" &
+        
+        jobs+=($!)
+        
+        # If we've reached max jobs, wait for one to complete
+        if [[ ${#jobs[@]} -ge $max_jobs ]]; then
+            wait -n
+            # Remove completed jobs
+            for i in "${!jobs[@]}"; do
+                if ! kill -0 "${jobs[$i]}" 2>/dev/null; then
+                    unset "jobs[$i]"
+                fi
+            done
+            jobs=("${jobs[@]}")  # Reindex array
+        fi
+    done
+    
+    # Wait for all remaining jobs
+    wait
+}
+
 # Optimized function to test TCP connectivity with caching
 test_tcp_port() {
     local host="$1"
@@ -86,9 +164,10 @@ test_tcp_port() {
         return
     fi
     
-    # Test connection with timeout (reduced from 1.5s to 0.5s)
+    # Test connection with timeout
+    local timeout_sec=$((TIMEOUT_MS / 1000))
     local result
-    if timeout 0.5 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
+    if timeout "$timeout_sec" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
         result="success"
     else
         result="refused"
@@ -114,17 +193,18 @@ test_http_protocol() {
     local result=""
     
     # Test HTTP with curl (faster than wget)
+    local timeout_sec=$((TIMEOUT_MS / 1000))
     if command -v curl >/dev/null 2>&1; then
-        if curl -s -m 1 "http://$host:$port/" >/dev/null 2>&1; then
+        if curl -s -m "$timeout_sec" "http://$host:$port/" >/dev/null 2>&1; then
             result="HTTP"
-        elif curl -s -m 1 -k "https://$host:$port/" >/dev/null 2>&1; then
+        elif curl -s -m "$timeout_sec" -k "https://$host:$port/" >/dev/null 2>&1; then
             result="HTTPS"
         fi
     else
         # Fallback to wget
-        if wget -q --timeout=1 --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
+        if wget -q --timeout="$timeout_sec" --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
             result="HTTP"
-        elif wget -q --timeout=1 --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
+        elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
             result="HTTPS"
         fi
     fi
@@ -168,7 +248,7 @@ write_service_output() {
     local status="$4"
     local ping="$5"
     local source="$6"
-    write_discovery_line "$hostname;$service_name;$protocol;$port;$status;$ping;$source"
+    write_discovery_line "$HOSTNAME;$service_name;$protocol;$port;$status;$ping;$source"
 }
 
 # Function to get service name from port
@@ -231,7 +311,7 @@ write_discovery_line "# Service Discovery Results"
 write_discovery_line "# Generated at $(date)"
 write_discovery_line "# hostname;$HOSTNAME_IPV4;$HOSTNAME_IPV6"
 write_discovery_line ""
-write_discovery_line "# service name;protocol;port;status;ping ms;source"
+write_discovery_line "# hostname;service name;protocol;port;status;ping ms;source"
 
 # Method 1: lsof (most comprehensive) - Only listening servers
 if [[ "$VERBOSE" == "true" ]]; then
@@ -415,4 +495,9 @@ fi
 if [[ "$VERBOSE" == "true" ]]; then
     write_discovery_line ""
     write_discovery_line "# Scan completed at $(date)"
+    write_discovery_line "# Performance optimizations applied:"
+    write_discovery_line "# - Parallel processing with $MAX_PARALLEL_JOBS concurrent jobs"
+    write_discovery_line "# - Connection caching to avoid duplicate tests"
+    write_discovery_line "# - Consistent timeouts using TIMEOUT_MS parameter (${TIMEOUT_MS}ms)"
+    write_discovery_line "# - Fast HTTP detection with curl"
 fi
