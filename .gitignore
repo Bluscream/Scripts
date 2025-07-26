@@ -44,3 +44,4 @@ banner.json
 ActionCenterEvents.exe
 BlockShutdown.exe
 /service-discovery/devices/
+service-discovery/devices/BLU-PC.json

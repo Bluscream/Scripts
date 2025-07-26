@@ -2,18 +2,91 @@
 # Service Discovery Script for Linux/Unix
 # Discovers running services and their listening ports
 # Output format: <hostname>;<service name>;<protocol>;<port>;<status>;<ping ms>;<source>;<note>
+#
+# This script always runs all available detection methods (lsof, ss, netstat) and aggregates/deduplicates results.
+# Only unique service_name|protocol|port combinations are output.
 
 set -euo pipefail
 
 # Configuration
 INCLUDE_DOCKER=${INCLUDE_DOCKER:-true}
 INCLUDE_SYSTEMD=${INCLUDE_SYSTEMD:-true}
-VERBOSE=${VERBOSE:-false}
+INCLUDE_WSL=${INCLUDE_WSL:-false}
+VERBOSE=${VERBOSE:-true}
 MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-10}
 TIMEOUT_MS=${TIMEOUT_MS:-500}
+GLOBAL_TIMEOUT=${GLOBAL_TIMEOUT:-5}
 
 # Get hostname
 HOSTNAME=$(hostname)
+
+# Function to get OS name and version
+get_os_name_and_version() {
+    local os_name=""
+    local os_version=""
+    
+    # Try /etc/os-release first (most modern Linux systems)
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        os_name="$NAME"
+        os_version="$VERSION_ID"
+    # Try /etc/lsb-release (Ubuntu/Debian)
+    elif [[ -f /etc/lsb-release ]]; then
+        source /etc/lsb-release
+        os_name="$DISTRIB_ID"
+        os_version="$DISTRIB_RELEASE"
+    # Try /etc/redhat-release (RHEL/CentOS)
+    elif [[ -f /etc/redhat-release ]]; then
+        os_name=$(cat /etc/redhat-release | cut -d' ' -f1)
+        os_version=$(cat /etc/redhat-release | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    # Try uname as fallback
+    else
+        os_name=$(uname -s)
+        os_version=$(uname -r)
+    fi
+    
+    # Clean up the values
+    os_name=$(echo "$os_name" | tr '[:upper:]' '[:lower:]' | sed 's/linux//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    os_version=$(echo "$os_version" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    if [[ -z "$os_name" ]]; then
+        os_name="unknown"
+    fi
+    if [[ -z "$os_version" ]]; then
+        os_version="unknown"
+    fi
+    
+    echo "$os_name $os_version"
+}
+
+# Function to get MAC addresses
+get_mac_addresses() {
+    local mac_addresses=()
+    
+    # Try different methods to get MAC addresses
+    if command -v ip >/dev/null 2>&1; then
+        # Modern Linux systems
+        while IFS= read -r mac; do
+            if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] && [[ "$mac" != "00:00:00:00:00:00" ]]; then
+                mac_addresses+=("$mac")
+            fi
+        done < <(ip link show | grep -oP 'link/ether \K[0-9a-f:]+' | tr '[:lower:]' '[:upper:]')
+    elif command -v ifconfig >/dev/null 2>&1; then
+        # Traditional Unix systems
+        while IFS= read -r mac; do
+            if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] && [[ "$mac" != "00:00:00:00:00:00" ]]; then
+                mac_addresses+=("$mac")
+            fi
+        done < <(ifconfig | grep -oP 'ether \K[0-9a-f:]+' | tr '[:lower:]' '[:upper:]')
+    fi
+    
+    # Return comma-separated list
+    if [[ ${#mac_addresses[@]} -gt 0 ]]; then
+        IFS=','; echo "${mac_addresses[*]}"
+    else
+        echo ""
+    fi
+}
 
 # Get all local IP addresses (IPv4 and IPv6)
 get_local_ips() {
@@ -63,6 +136,8 @@ get_local_ips() {
 IP_INFO=$(get_local_ips)
 HOSTNAME_IPV4=$(echo "$IP_INFO" | cut -d'|' -f1)
 HOSTNAME_IPV6=$(echo "$IP_INFO" | cut -d'|' -f2)
+OS_INFO=$(get_os_name_and_version)
+MAC_ADDRESSES=$(get_mac_addresses)
 
 LOGFILE="${TMPDIR:-/tmp}/discovery.log"
 
@@ -83,12 +158,12 @@ test_tcp_port_with_ping() {
     local cache_key="${host}:${port}"
     
     # Check cache first
-    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+    if [[ -v unified_cache[$cache_key] ]]; then
         echo "${unified_cache[$cache_key]}"
         return
     fi
     
-    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local timeout_sec=$GLOBAL_TIMEOUT
     local start_time
     local end_time
     local ping_time
@@ -96,13 +171,14 @@ test_tcp_port_with_ping() {
     
     # Measure connection time
     start_time=$(date +%s%3N 2>/dev/null || date +%s000)
-    
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "+ timeout $timeout_sec bash -c 'echo >/dev/tcp/$host/$port'" >&2
+    fi
     if timeout "$timeout_sec" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
         result="success"
     else
         result="refused"
     fi
-    
     end_time=$(date +%s%3N 2>/dev/null || date +%s000)
     ping_time=$((end_time - start_time))
     
@@ -111,21 +187,24 @@ test_tcp_port_with_ping() {
     echo "${result}|${ping_time}"
 }
 
-# Function to get TCP banner/MOTD information
+# Enhanced function to get TCP banner/MOTD information
 get_tcp_banner() {
     local host="$1"
     local port="$2"
-    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local timeout_sec=$GLOBAL_TIMEOUT
     local banner=""
     
-    # Use timeout and nc (netcat) to get banner
     if command -v nc >/dev/null 2>&1; then
-        banner=$(timeout "$timeout_sec" nc -w "$timeout_sec" "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "+ timeout $timeout_sec nc -w $timeout_sec $host $port" >&2
+        fi
+        banner=$(timeout "$timeout_sec" nc -w "$timeout_sec" "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g' | sed 's/,/<comma>/g')
     elif command -v telnet >/dev/null 2>&1; then
-        # Fallback to telnet
-        banner=$(timeout "$timeout_sec" telnet "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "+ timeout $timeout_sec telnet $host $port" >&2
+        fi
+        banner=$(timeout "$timeout_sec" telnet "$host" "$port" 2>/dev/null | head -c 1024 | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g' | sed 's/,/<comma>/g')
     fi
-    
     echo "$banner"
 }
 
@@ -136,18 +215,19 @@ test_http_protocol_enhanced() {
     local cache_key="http_${host}:${port}"
     
     # Check cache first
-    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+    if [[ -v unified_cache[$cache_key] ]]; then
         echo "${unified_cache[$cache_key]}"
         return
     fi
     
-    local timeout_sec=$((TIMEOUT_MS / 1000))
+    local timeout_sec=$GLOBAL_TIMEOUT
     local result=""
     local note=""
     
-    # Test HTTP with curl for detailed response
     if command -v curl >/dev/null 2>&1; then
-        # Test HTTP
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "+ curl -s -m $timeout_sec -w ... http://$host:$port/" >&2
+        fi
         local http_response
         http_response=$(curl -s -m "$timeout_sec" -w "%{http_code}|%{server}|%{powered_by}" "http://$host:$port/" 2>/dev/null || echo "")
         
@@ -158,18 +238,21 @@ test_http_protocol_enhanced() {
             
             if [[ "$status_code" =~ ^[0-9]+$ ]] && [[ "$status_code" -ge 100 ]] && [[ "$status_code" -lt 600 ]]; then
                 result="HTTP"
-                note="HTTP $status_code"
+                note="Status: $status_code"
                 if [[ -n "$server_header" && "$server_header" != "unknown" ]]; then
-                    note="$note Server:$server_header"
+                    note="$note,Server: $server_header"
                 fi
                 if [[ -n "$powered_by" && "$powered_by" != "unknown" ]]; then
-                    note="$note PoweredBy:$powered_by"
+                    note="$note,PoweredBy: $powered_by"
                 fi
             fi
         fi
         
         # Test HTTPS if HTTP failed
         if [[ -z "$result" ]]; then
+            if [[ "$VERBOSE" == "true" ]]; then
+                echo "+ curl -s -m $timeout_sec -k -w ... https://$host:$port/" >&2
+            fi
             local https_response
             https_response=$(curl -s -m "$timeout_sec" -k -w "%{http_code}|%{server}|%{powered_by}" "https://$host:$port/" 2>/dev/null || echo "")
             
@@ -180,22 +263,24 @@ test_http_protocol_enhanced() {
                 
                 if [[ "$status_code" =~ ^[0-9]+$ ]] && [[ "$status_code" -ge 100 ]] && [[ "$status_code" -lt 600 ]]; then
                     result="HTTPS"
-                    note="HTTPS $status_code"
+                    note="Status: $status_code"
                     if [[ -n "$server_header" && "$server_header" != "unknown" ]]; then
-                        note="$note Server:$server_header"
+                        note="$note,Server: $server_header"
                     fi
                     if [[ -n "$powered_by" && "$powered_by" != "unknown" ]]; then
-                        note="$note PoweredBy:$powered_by"
+                        note="$note,PoweredBy: $powered_by"
                     fi
                 fi
             fi
         fi
     else
-        # Fallback to wget (less detailed)
-        if wget -q --timeout="$timeout_sec" --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "+ timeout $timeout_sec wget ... http://$host:$port/" >&2
+        fi
+        if timeout "$timeout_sec" wget -q --timeout="$timeout_sec" --tries=1 "http://$host:$port/" -O /dev/null 2>/dev/null; then
             result="HTTP"
             note="HTTP (wget)"
-        elif wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
+        elif timeout "$timeout_sec" wget -q --timeout="$timeout_sec" --tries=1 --no-check-certificate "https://$host:$port/" -O /dev/null 2>/dev/null; then
             result="HTTPS"
             note="HTTPS (wget)"
         fi
@@ -213,7 +298,7 @@ test_connection_and_protocol() {
     local cache_key="unified_${host}:${port}"
     
     # Check cache first
-    if [[ -n "${unified_cache[$cache_key]}" ]]; then
+    if [[ -v unified_cache[$cache_key] ]]; then
         echo "${unified_cache[$cache_key]}"
         return
     fi
@@ -379,11 +464,59 @@ get_process_name() {
     fi
 }
 
+# Function to check if WSL is available and get WSL processes
+check_wsl_processes() {
+    local wsl_processes=()
+    
+    # Check for WSL processes
+    if command -v ps >/dev/null 2>&1; then
+        while IFS= read -r process; do
+            if [[ "$process" =~ wsl ]] || [[ "$process" =~ ubuntu ]] || [[ "$process" =~ debian ]]; then
+                wsl_processes+=("$process")
+            fi
+        done < <(ps -eo pid,comm --no-headers 2>/dev/null | grep -E "(wsl|ubuntu|debian)" || true)
+    fi
+    
+    echo "${wsl_processes[@]}"
+}
+
+# Aggregation: track seen services to deduplicate
+# Key: service_name|protocol|port
+# Value: 1 (seen)
+declare -A seen_services
+
+add_service() {
+  local service_name="$1"
+  local protocol="$2"
+  local port="$3"
+  local status="$4"
+  local ping="$5"
+  local source="$6"
+  local note="$7"
+  local key="${service_name}|${protocol}|${port}"
+  
+  if [[ "$VERBOSE" == "true" ]]; then
+    write_discovery_line "DEBUG: add_service called - service: $service_name, protocol: $protocol, port: $port, source: $source"
+  fi
+  
+  if [[ -z "${seen_services[$key]:-}" ]]; then
+    seen_services[$key]=1
+    if [[ "$VERBOSE" == "true" ]]; then
+      write_discovery_line "DEBUG: Service is new, adding to output"
+    fi
+    write_service_output "$service_name" "$protocol" "$port" "$status" "$ping" "$source" "$note"
+  else
+    if [[ "$VERBOSE" == "true" ]]; then
+      write_discovery_line "DEBUG: Service already seen, skipping duplicate"
+    fi
+  fi
+}
+
 write_discovery_line "# Service Discovery Results"
 write_discovery_line "# Generated at $(date)"
 write_discovery_line ""
-write_discovery_line "# hostname;ipv4s;ipv6s"
-write_discovery_line "# $HOSTNAME;$HOSTNAME_IPV4;$HOSTNAME_IPV6"
+write_discovery_line "# hostname;os;ipv4s;ipv6s;macs"
+write_discovery_line "$HOSTNAME;$OS_INFO;$HOSTNAME_IPV4;$HOSTNAME_IPV6;$MAC_ADDRESSES"
 write_discovery_line ""
 write_discovery_line "# hostname;service name;protocol;port;status;ping ms;source;note"
 
@@ -393,45 +526,114 @@ if [[ "$VERBOSE" == "true" ]]; then
 fi
 
 if command -v lsof >/dev/null 2>&1; then
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Running lsof -nP -iTCP -sTCP:LISTEN"
+        echo "+ timeout $GLOBAL_TIMEOUT lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null" >&2
+    fi
+    
     # TCP connections - only LISTENING state
-    lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null | tail -n +2 | while read -r line; do
-        if [[ $line =~ ([[:space:]]+)([0-9]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+:[0-9]+) ]]; then
-            pid="${BASH_REMATCH[2]}"
-            process_name="${BASH_REMATCH[4]}"
-            address="${BASH_REMATCH[10]}"
-            
-            if [[ $address =~ :([0-9]+)$ ]]; then
-                port="${BASH_REMATCH[1]}"
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_process_name "$pid")
-                fi
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_service_name_from_port "$port")
-                fi
-                process_single_service "$process_name" "TCP" "$port" "lsof"
+    timeout $GLOBAL_TIMEOUT lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing lsof TCP line: $line"
+        fi
+        
+        process_name=$(echo "$line" | awk '{print $1}')
+        pid=$(echo "$line" | awk '{print $2}')
+        address=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /TCP/) print $(i+1)}' | cut -d'(' -f1)
+        port=$(echo "$address" | awk -F: '{print $NF}')
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: lsof TCP parsed - process: $process_name, pid: $pid, address: $address, port: $port"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof TCP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ "$process_name" == "Unknown" ]]; then
+            process_name=$(get_process_name "$pid")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof TCP got process name from PID: $process_name"
             fi
         fi
+        if [[ "$process_name" == "Unknown" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof TCP got process name from port: $process_name"
+            fi
+        fi
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: lsof TCP testing connection for $process_name on port $port"
+        fi
+        
+        unified_result=$(test_connection_and_protocol "127.0.0.1" "$port")
+        status=$(echo "$unified_result" | cut -d'|' -f1)
+        ping_time=$(echo "$unified_result" | cut -d'|' -f2)
+        final_protocol=$(echo "$unified_result" | cut -d'|' -f3)
+        note=$(echo "$unified_result" | cut -d'|' -f4)
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: lsof TCP result - status: $status, protocol: $final_protocol, ping: $ping_time, note: $note"
+        fi
+        
+        add_service "$process_name" "$final_protocol" "$port" "$status" "$ping_time" "lsof" "$note"
     done
     
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished lsof TCP scanning"
+        write_discovery_line "DEBUG: Running lsof -nP -iUDP -sUDP:IDLE"
+        echo "+ timeout $GLOBAL_TIMEOUT lsof -nP -iUDP -sUDP:IDLE 2>/dev/null" >&2
+    fi
+    
     # UDP connections - only listening servers
-    lsof -iUDP -sUDP:IDLE -n -P 2>/dev/null | tail -n +2 | while read -r line; do
-        if [[ $line =~ ([[:space:]]+)([0-9]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+)([[:space:]]+)([^[:space:]]+:[0-9]+) ]]; then
-            pid="${BASH_REMATCH[2]}"
-            process_name="${BASH_REMATCH[4]}"
-            address="${BASH_REMATCH[10]}"
-            
-            if [[ $address =~ :([0-9]+)$ ]]; then
-                port="${BASH_REMATCH[1]}"
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_process_name "$pid")
-                fi
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_service_name_from_port "$port")
-                fi
-                process_single_service "$process_name" "UDP" "$port" "lsof"
+    timeout $GLOBAL_TIMEOUT lsof -nP -iUDP -sUDP:IDLE 2>/dev/null | awk 'NR>1 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing lsof UDP line: $line"
+        fi
+        
+        process_name=$(echo "$line" | awk '{print $1}')
+        pid=$(echo "$line" | awk '{print $2}')
+        address=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /UDP/) print $(i+1)}' | cut -d'(' -f1)
+        port=$(echo "$address" | awk -F: '{print $NF}')
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: lsof UDP parsed - process: $process_name, pid: $pid, address: $address, port: $port"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof UDP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ "$process_name" == "Unknown" ]]; then
+            process_name=$(get_process_name "$pid")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof UDP got process name from PID: $process_name"
             fi
         fi
+        if [[ "$process_name" == "Unknown" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: lsof UDP got process name from port: $process_name"
+            fi
+        fi
+        
+        add_service "$process_name" "UDP" "$port" "" "" "lsof" ""
     done
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished lsof UDP scanning"
+    fi
+else
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: lsof command not found"
+    fi
 fi
 
 # Method 2: ss (modern alternative to netstat) - Only listening servers
@@ -440,25 +642,102 @@ if [[ "$VERBOSE" == "true" ]]; then
 fi
 
 if command -v ss >/dev/null 2>&1; then
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Running ss -tlnp"
+        echo "+ timeout $GLOBAL_TIMEOUT ss -tlnp 2>/dev/null" >&2
+    fi
+    
     # TCP connections - only LISTEN state
-    ss -tlnp 2>/dev/null | tail -n +2 | while read -r line; do
-        if [[ $line =~ ([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
-            local_address="${BASH_REMATCH[4]}"
-            if [[ $local_address =~ :([0-9]+)$ ]]; then
-                port="${BASH_REMATCH[1]}"
-                process_info="${BASH_REMATCH[5]}"
-                
-                if [[ $process_info =~ pid=([0-9]+) ]]; then
-                    pid="${BASH_REMATCH[1]}"
-                    process_name=$(get_process_name "$pid")
-                    if [[ "$process_name" == "Unknown" ]]; then
-                        process_name=$(get_service_name_from_port "$port")
-                    fi
-                    process_single_service "$process_name" "TCP" "$port" "ss"
-                fi
+    timeout $GLOBAL_TIMEOUT ss -tlnp 2>/dev/null | awk 'NR>1 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing ss TCP line: $line"
+        fi
+        
+        local_address=$(echo "$line" | awk '{print $4}')
+        port=$(echo "$local_address" | awk -F: '{print $NF}')
+        process_info=$(echo "$line" | awk '{print $5}')
+        process_name=$(echo "$process_info" | grep -oP 'users:\(\("([^"]+)' | head -1 | cut -d'"' -f2)
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: ss TCP parsed - local_address: $local_address, port: $port, process_info: $process_info, process_name: $process_name"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: ss TCP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ -z "$process_name" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: ss TCP got process name from port: $process_name"
             fi
         fi
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: ss TCP testing connection for $process_name on port $port"
+        fi
+        
+        unified_result=$(test_connection_and_protocol "127.0.0.1" "$port")
+        status=$(echo "$unified_result" | cut -d'|' -f1)
+        ping_time=$(echo "$unified_result" | cut -d'|' -f2)
+        final_protocol=$(echo "$unified_result" | cut -d'|' -f3)
+        note=$(echo "$unified_result" | cut -d'|' -f4)
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: ss TCP result - status: $status, protocol: $final_protocol, ping: $ping_time, note: $note"
+        fi
+        
+        add_service "$process_name" "$final_protocol" "$port" "$status" "$ping_time" "ss" "$note"
     done
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished ss TCP scanning"
+        write_discovery_line "DEBUG: Running ss -ulnp"
+        echo "+ timeout $GLOBAL_TIMEOUT ss -ulnp 2>/dev/null" >&2
+    fi
+    
+    # UDP connections - only listening state
+    timeout $GLOBAL_TIMEOUT ss -ulnp 2>/dev/null | awk 'NR>1 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing ss UDP line: $line"
+        fi
+        
+        local_address=$(echo "$line" | awk '{print $4}')
+        port=$(echo "$local_address" | awk -F: '{print $NF}')
+        process_info=$(echo "$line" | awk '{print $5}')
+        process_name=$(echo "$process_info" | grep -oP 'users:\(\("([^"]+)' | head -1 | cut -d'"' -f2)
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: ss UDP parsed - local_address: $local_address, port: $port, process_info: $process_info, process_name: $process_name"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: ss UDP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ -z "$process_name" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: ss UDP got process name from port: $process_name"
+            fi
+        fi
+        
+        add_service "$process_name" "UDP" "$port" "" "" "ss" ""
+    done
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished ss UDP scanning"
+    fi
+else
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: ss command not found"
+    fi
 fi
 
 # Method 3: netstat (fallback) - Only listening servers
@@ -467,24 +746,101 @@ if [[ "$VERBOSE" == "true" ]]; then
 fi
 
 if command -v netstat >/dev/null 2>&1; then
-    netstat -tlnp 2>/dev/null | tail -n +2 | while read -r line; do
-        if [[ $line =~ ([^[:space:]]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
-            port="${BASH_REMATCH[4]}"
-            process_info="${BASH_REMATCH[7]}"
-            
-            if [[ $process_info =~ ([0-9]+)/([^[:space:]]+) ]]; then
-                pid="${BASH_REMATCH[1]}"
-                process_name="${BASH_REMATCH[2]}"
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_process_name "$pid")
-                fi
-                if [[ "$process_name" == "Unknown" ]]; then
-                    process_name=$(get_service_name_from_port "$port")
-                fi
-                process_single_service "$process_name" "TCP" "$port" "netstat"
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Running netstat -tlnp"
+        echo "+ timeout $GLOBAL_TIMEOUT netstat -tlnp 2>/dev/null" >&2
+    fi
+    
+    netstat -tlnp 2>/dev/null | awk 'NR>2 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing netstat TCP line: $line"
+        fi
+        
+        local_address=$(echo "$line" | awk '{print $4}')
+        port=$(echo "$local_address" | awk -F: '{print $NF}')
+        process_info=$(echo "$line" | awk '{print $7}')
+        process_name=$(echo "$process_info" | awk -F/ '{print $2}')
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: netstat TCP parsed - local_address: $local_address, port: $port, process_info: $process_info, process_name: $process_name"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: netstat TCP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ -z "$process_name" || "$process_name" == "-" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: netstat TCP got process name from port: $process_name"
             fi
         fi
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: netstat TCP testing connection for $process_name on port $port"
+        fi
+        
+        unified_result=$(test_connection_and_protocol "127.0.0.1" "$port")
+        status=$(echo "$unified_result" | cut -d'|' -f1)
+        ping_time=$(echo "$unified_result" | cut -d'|' -f2)
+        final_protocol=$(echo "$unified_result" | cut -d'|' -f3)
+        note=$(echo "$unified_result" | cut -d'|' -f4)
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: netstat TCP result - status: $status, protocol: $final_protocol, ping: $ping_time, note: $note"
+        fi
+        
+        add_service "$process_name" "$final_protocol" "$port" "$status" "$ping_time" "netstat" "$note"
     done
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished netstat TCP scanning"
+        write_discovery_line "DEBUG: Running netstat -ulnp"
+        echo "+ timeout $GLOBAL_TIMEOUT netstat -ulnp 2>/dev/null" >&2
+    fi
+    
+    # UDP connections
+    netstat -ulnp 2>/dev/null | awk 'NR>2 {print}' | while read -r line; do
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: Processing netstat UDP line: $line"
+        fi
+        
+        local_address=$(echo "$line" | awk '{print $4}')
+        port=$(echo "$local_address" | awk -F: '{print $NF}')
+        process_info=$(echo "$line" | awk '{print $7}')
+        process_name=$(echo "$process_info" | awk -F/ '{print $2}')
+        
+        if [[ "$VERBOSE" == "true" ]]; then
+            write_discovery_line "DEBUG: netstat UDP parsed - local_address: $local_address, port: $port, process_info: $process_info, process_name: $process_name"
+        fi
+        
+        if [[ -z "$port" ]]; then 
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: netstat UDP skipping - no port found"
+            fi
+            continue
+        fi
+        
+        if [[ -z "$process_name" || "$process_name" == "-" ]]; then
+            process_name=$(get_service_name_from_port "$port")
+            if [[ "$VERBOSE" == "true" ]]; then
+                write_discovery_line "DEBUG: netstat UDP got process name from port: $process_name"
+            fi
+        fi
+        
+        add_service "$process_name" "UDP" "$port" "" "" "netstat" ""
+    done
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: Finished netstat UDP scanning"
+    fi
+else
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "DEBUG: netstat command not found"
+    fi
 fi
 
 # Method 4: Docker containers - Only exposed ports (server ports)
@@ -540,7 +896,34 @@ if [[ "$INCLUDE_SYSTEMD" == "true" ]]; then
     fi
 fi
 
-# Method 6: Check for Kubernetes services (if kubectl is available) - Only NodePort/LoadBalancer services
+# Method 6: WSL processes (if WSL is available) - Only listening servers
+if [[ "$INCLUDE_WSL" == "true" ]]; then
+    if [[ "$VERBOSE" == "true" ]]; then
+        write_discovery_line "Scanning WSL processes (listening servers only)..."
+    fi
+    
+    wsl_processes=$(check_wsl_processes)
+    if [[ -n "$wsl_processes" ]]; then
+        for process in $wsl_processes; do
+            if [[ $process =~ ([0-9]+) ]]; then
+                pid="${BASH_REMATCH[1]}"
+                process_name=$(get_process_name "$pid")
+                
+                # Check if this WSL process is listening on any ports
+                if command -v lsof >/dev/null 2>&1; then
+                    lsof -iTCP -sTCP:LISTEN -p "$pid" -n -P 2>/dev/null | tail -n +2 | while read -r lsof_line; do
+                        if [[ $lsof_line =~ :([0-9]+)$ ]]; then
+                            port="${BASH_REMATCH[1]}"
+                            process_single_service "WSL-$process_name" "TCP" "$port" "WSL"
+                        fi
+                    done
+                fi
+            fi
+        done
+    fi
+fi
+
+# Method 7: Check for Kubernetes services (if kubectl is available) - Only NodePort/LoadBalancer services
 if [[ "$VERBOSE" == "true" ]]; then
     write_discovery_line "Scanning Kubernetes services (NodePort/LoadBalancer only)..."
 fi
@@ -569,7 +952,9 @@ fi
 if [[ "$VERBOSE" == "true" ]]; then
     write_discovery_line ""
     write_discovery_line "# Scan completed at $(date)"
-    write_discovery_line "# Performance optimizations applied:"
+    write_discovery_line "# Summary:"
+    write_discovery_line "# - Total unique services found: ${#seen_services[@]}"
+    write_discovery_line "# - Performance optimizations applied:"
     write_discovery_line "# - Parallel processing with $MAX_PARALLEL_JOBS concurrent jobs"
     write_discovery_line "# - Connection caching to avoid duplicate tests"
     write_discovery_line "# - Consistent timeouts using TIMEOUT_MS parameter (${TIMEOUT_MS}ms)"
@@ -577,4 +962,9 @@ if [[ "$VERBOSE" == "true" ]]; then
     write_discovery_line "# - TCP banner grabbing for non-HTTP services"
     write_discovery_line "# - Ping time measurement for connection latency"
     write_discovery_line "# - Note field for additional service information"
+    write_discovery_line "# - OS and MAC address detection"
+    write_discovery_line "# - WSL process detection"
+    write_discovery_line "# - Enhanced UDP service detection"
+    write_discovery_line "# - Improved error handling and verbose output"
+    write_discovery_line "# - Deduplication using associative arrays"
 fi

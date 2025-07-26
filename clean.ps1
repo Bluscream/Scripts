@@ -1,5 +1,5 @@
 param (
-    [Parameter(Position=0, Mandatory=$false)]
+    [Parameter(Position = 0, Mandatory = $false)]
     # [ValidateSet(...)] removed for manual validation
     [string[]]$Actions = @(),
     [switch]$SkipUAC = $false,
@@ -13,9 +13,42 @@ param (
 . "$PSScriptRoot/powershell/steps.ps1"
 
 # --- Cleaning function definitions ---
+function Invoke-PipCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Arguments
+    )
+    $commands = @(
+        "pip",
+        'python -m pip',
+        'python3 -m pip',
+        '."C:\Users\Bluscream\.pyenv\pyenv-win\versions\3.14.0a4\python.exe" -m pip'
+    )
+    foreach ($cmd in $commands) {
+        try {
+            $cmdLine = "$cmd $Arguments"
+            Write-Host "Running command: $cmdLine"
+            $output = & $cmdLine 2>&1
+            Write-Host "Output: $output"
+            Write-Host "Last exit code: $LASTEXITCODE" 
+            if ($LASTEXITCODE -eq 0 -and $output) {
+                return $output
+            }
+        }
+        catch {
+            Write-Verbose "Failed to run pip command: $_"
+        }
+    }
+    Write-Warning "Failed to run pip command: $Arguments"
+}
+
 function Backup-Pip {
     Set-Title "Backing up pip packages"
-    $pipList = pip list --format=freeze
+    $pipList = Invoke-PipCommand -Arguments "list --format=freeze"
+    if (-not $pipList) {
+        Write-Warning "Could not retrieve pip package list. Skipping backup."
+        return
+    }
     $backupFilePath = "requirements.txt"
     $pipList | Out-File -FilePath $backupFilePath -Encoding utf8
     Write-Host "Pip packages have been backed up to $backupFilePath"
@@ -23,10 +56,20 @@ function Backup-Pip {
 function Clear-Pip {
     $packageWhitelist = "wheel", "setuptools", "pip"
     Set-Title "Cleaning pip packages except ($packageWhitelist)"
-    $allPackages = pip list --format=freeze | ForEach-Object { $_.Split('==')[0] }
-    $unimportantPackages = $allPackages | Where-Object { $_ -notin $packageWhitelist }
+    $pipList = Invoke-PipCommand -Arguments "list --format=freeze"
+    if (-not $pipList) {
+        Write-Warning "Could not retrieve pip package list. Skipping uninstall."
+        return
+    }
+    $allPackages = $pipList | ForEach-Object { $_.Split('==')[0] }
+    $unimportantPackages = $allPackages | Where-Object { $_ -and ($_ -notin $packageWhitelist) }
     foreach ($package in $unimportantPackages) {
-        pip uninstall -y $package
+        try {
+            Invoke-PipCommand -Arguments "uninstall -y $package"
+        }
+        catch {
+            Write-Warning "Failed to uninstall package $($package): $_"
+        }
     }
 }
 function Backup-Npm {
@@ -69,7 +112,8 @@ function Remove-MappedDrives {
             Remove-PSDrive -Name $letter -Force -ErrorAction Stop
             net use "$($letter):" /delete /y | Out-Null
             Write-Host "Removed mapped drive $letter."
-        } catch {
+        }
+        catch {
             Write-Warning "Failed to remove mapped drive $letter. $_"
         }
     }
@@ -87,11 +131,13 @@ function Clear-Downloads {
                     try {
                         if ($item.PSIsContainer) {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
-                        } else {
+                        }
+                        else {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
                         }
                         Write-Host "Moved to Recycle Bin: $($item.FullName)"
-                    } catch {
+                    }
+                    catch {
                         Write-Host "Failed to move to Recycle Bin: $($item.FullName) - $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                 }
@@ -143,11 +189,13 @@ function Clear-WindowsEventlogs {
             $fistLogEvent = Get-WinEvent -LogName $LogName -MaxEvents 1 --ErrorAction SilentlyContinue
             $logSizeMB = $fistLogEvent.MaximumSizeInBytes / 1MB
             $txt += " ($logSizeMB MB)"
-        } catch { }
+        }
+        catch { }
         Write-Host $txt
         try {
             wevtutil.exe cl "$LogName"
-        } catch {
+        }
+        catch {
             Write-Host "Failed to clear $LogName. Error: $_"
         }
     }
@@ -155,39 +203,39 @@ function Clear-WindowsEventlogs {
 
 # Extend or override $possibleSteps directly
 $possibleSteps["clean"] = @{
-        "pip" = @{
-            Description = "Clean pip cache and packages"
-            Code = { Backup-Pip; Clear-Pip }
-        }
-        "npm" = @{
-            Description = "Clean npm cache and node_modules"
-            Code = { Backup-Npm; Clear-Npm }
-        }
-        "windows" = @{
-            Description = "Clean Windows temp files, caches, and system folders"
-            Code = { Clear-Windows }
-        }
-        "eventlogs" = @{
-            Description = "Clear Windows event logs"
-            Code = { Clear-WindowsEventlogs }
-        }
-        "netdrives" = @{
-            Description = "Remove mapped network drives"
-            Code = { Remove-MappedDrives }
-        }
-        "downloads" = @{
-            Description = "Clean Downloads folders for all users except whitelisted ones"
-            Code = { Clear-Downloads }
-        }
+    "pip"       = @{
+        Description = "Clean pip cache and packages"
+        Code        = { Backup-Pip; Clear-Pip }
     }
+    "npm"       = @{
+        Description = "Clean npm cache and node_modules"
+        Code        = { Backup-Npm; Clear-Npm }
+    }
+    "windows"   = @{
+        Description = "Clean Windows temp files, caches, and system folders"
+        Code        = { Clear-Windows }
+    }
+    "eventlogs" = @{
+        Description = "Clear Windows event logs"
+        Code        = { Clear-WindowsEventlogs }
+    }
+    "netdrives" = @{
+        Description = "Remove mapped network drives"
+        Code        = { Remove-MappedDrives }
+    }
+    "downloads" = @{
+        Description = "Clean Downloads folders for all users except whitelisted ones"
+        Code        = { Clear-Downloads }
+    }
+}
 $possibleSteps["meta"] = @{
-        "all" = @{
-            Description = "Run all cleaning actions"
-        Actions = $possibleSteps["clean"].Keys
-        }
-        "default" = @{
+    "all"     = @{
+        Description = "Run all cleaning actions"
+        Actions     = $possibleSteps["clean"].Keys
+    }
+    "default" = @{
         Description = "Default actions"
-            Actions = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
+        Actions     = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
     }
 }
 

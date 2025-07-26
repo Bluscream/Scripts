@@ -49,6 +49,11 @@
             "type": "string",
             "description": "The schema version of the device configuration file"
         },
+        "last_updated": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The date and time the device configuration was last updated"
+        },
         "name": {
             "type": "string",
             "description": "The name/identifier of the device"
