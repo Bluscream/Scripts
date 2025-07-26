@@ -79,15 +79,8 @@ write_service_output() {
     local status="$4"
     local ping="$5"
     local source="$6"
-    local detected_protocol="$7"
-    local out_proto
-    if [[ -n "$detected_protocol" ]]; then
-        out_proto="$detected_protocol"
-    else
-        out_proto="$protocol"
-    fi
-    write_discovery_line "$service_name;$out_proto;$port;$status;$ping;$source"
-}
+    write_discovery_line "$hostname;$service_name;$protocol;$port;$status;$ping;$source"
+}a
 
 # Function to get service name from port
 get_service_name_from_port() {

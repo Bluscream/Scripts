@@ -43,11 +43,9 @@ function Write-ServiceOutput {
         [string]$Port,
         [string]$Status = "",
         [string]$Ping = "",
-        [string]$Source = "",
-        [string]$DetectedProtocol = ""
+        [string]$Source = ""
     )
-    $outProto = if ($DetectedProtocol) { $DetectedProtocol } else { $Protocol }
-    $line = "$hostname;$ServiceName;$outProto;$Port;$Status;$Ping;$Source"
+    $line = "$hostname;$ServiceName;$Protocol;$Port;$Status;$Ping;$Source"
     Write-DiscoveryLine $line
 }
 
@@ -182,8 +180,8 @@ try {
             $serviceName = Get-ServiceNameFromPort -Port $conn.LocalPort
         }
         $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-        $httpProto = $null; if ($result.status -eq 'success') { $httpProto = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort }
-        Write-ServiceOutput -ServiceName $serviceName -Protocol 'TCP' -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $result.status -Ping $result.ping -DetectedProtocol $httpProto
+        $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+        Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $conn.LocalPort -Source 'Get-NetTCPConnection' -Status $result.status -Ping $result.ping
     }
 }
 catch {
@@ -204,8 +202,8 @@ try {
                 $serviceName = Get-ServiceNameFromPort -Port $port
             }
             $result = Test-TcpPort -Host '127.0.0.1' -Port $port
-            $httpProto = $null; if ($result.status -eq 'success') { $httpProto = Test-HttpProtocol -Host '127.0.0.1' -Port $port }
-            Write-ServiceOutput -ServiceName $serviceName -Protocol 'TCP' -Port $port -Source 'netstat' -Status $result.status -Ping $result.ping -DetectedProtocol $httpProto
+            $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $port; if ($detectedHttp) { $protocol = $detectedHttp } }
+            Write-ServiceOutput -ServiceName $serviceName -Protocol $protocol -Port $port -Source 'netstat' -Status $result.status -Ping $result.ping
         }
     }
 }
@@ -227,8 +225,8 @@ try {
             if ($tcpConnections) {
                 foreach ($conn in $tcpConnections) {
                     $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-                    $httpProto = $null; if ($result.status -eq 'success') { $httpProto = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort }
-                    Write-ServiceOutput -ServiceName $service.Name -Protocol 'TCP' -Port $conn.LocalPort -Source 'Windows Service' -Status $result.status -Ping $result.ping -DetectedProtocol $httpProto
+                    $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+                    Write-ServiceOutput -ServiceName $service.Name -Protocol $protocol -Port $conn.LocalPort -Source 'Windows Service' -Status $result.status -Ping $result.ping
                 }
             }
         }
@@ -255,8 +253,8 @@ if ($IncludeDocker) {
                         $containerPort = $matches[3]
                         $protocol = $matches[4].ToUpper()
                         $result = Test-TcpPort -Host '127.0.0.1' -Port $hostPort
-                        $httpProto = $null; if ($result.status -eq 'success') { $httpProto = Test-HttpProtocol -Host '127.0.0.1' -Port $hostPort }
-                        Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $protocol -Port $hostPort -Source "Docker" -Status $result.status -Ping $result.ping -DetectedProtocol $httpProto
+                        $dockerProtocol = $protocol; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $hostPort; if ($detectedHttp) { $dockerProtocol = $detectedHttp } }
+                        Write-ServiceOutput -ServiceName "Docker-$containerName" -Protocol $dockerProtocol -Port $hostPort -Source "Docker" -Status $result.status -Ping $result.ping
                     }
                 }
             }
@@ -278,8 +276,8 @@ if ($IncludeWSL) {
             
             foreach ($conn in $tcpConnections) {
                 $result = Test-TcpPort -Host '127.0.0.1' -Port $conn.LocalPort
-                $httpProto = $null; if ($result.status -eq 'success') { $httpProto = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort }
-                Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol "TCP" -Port $conn.LocalPort -Source "WSL" -Status $result.status -Ping $result.ping -DetectedProtocol $httpProto
+                $protocol = 'TCP'; if ($result.status -eq 'success') { $detectedHttp = Test-HttpProtocol -Host '127.0.0.1' -Port $conn.LocalPort; if ($detectedHttp) { $protocol = $detectedHttp } }
+                Write-ServiceOutput -ServiceName "WSL-$($process.ProcessName)" -Protocol $protocol -Port $conn.LocalPort -Source "WSL" -Status $result.status -Ping $result.ping
             }
         }
     }
