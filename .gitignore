@@ -33,10 +33,6 @@ hmdq/
 *- Copy (*).ini
 *.disabled
 /drives/
-/unraid/
-!/unraid/config/plugins/user.scripts/
-!/unraid/config/plugins/user.scripts/scripts/
-!/unraid/config/plugins/user.scripts/scripts/*
 *.cer
 /vm/Easy-GPU-PV/
 es.exe
@@ -47,6 +43,9 @@ ActionCenterEvents.exe
 BlockShutdown.exe
 /service-discovery/devices/
 service-discovery/devices/BLU-PC.json
-
 *.txz
 *.jar
+unraid\config\plugins\user.scripts\scripts\sort-apks\tools
+!/unraid/config/plugins/user.scripts/
+!/unraid/config/plugins/user.scripts/scripts/
+!/unraid/config/plugins/user.scripts/scripts/*
