@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_PATH="/boot/config/plugins/user.scripts/scripts/mount-qemu-image/script"
+SCRIPT_PATH="/boot/config/plugins/user.scripts/scripts/mount-image/script"
 if [[ ! -f "$SCRIPT_PATH" ]]; then
     echo "Error: Mount script not found at $SCRIPT_PATH"
     exit 1
