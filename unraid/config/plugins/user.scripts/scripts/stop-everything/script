@@ -1,0 +1,9 @@
+#!/bin/bash
+
+/etc/rc.d/rc.docker stop
+
+/etc/rc.d/rc.libvirt stop
+
+/etc/rc.d/rc.samba stop
+
+# /etc/rc.d/rc.php-fpm stop

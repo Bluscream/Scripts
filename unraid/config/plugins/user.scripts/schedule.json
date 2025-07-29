@@ -1,0 +1,134 @@
+{
+    "/boot/config/plugins/user.scripts/scripts/backup-docker/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/backup-docker/script",
+        "frequency": "disabled",
+        "id": "schedulebackup-docker",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/image-disk/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/image-disk/script",
+        "frequency": "disabled",
+        "id": "scheduleimage-disk",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/dns-fix/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/dns-fix/script",
+        "frequency": "boot",
+        "id": "scheduledns-fix",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/fix-nginx/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/fix-nginx/script",
+        "frequency": "disabled",
+        "id": "schedulefix-nginx",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/fix-share-perms/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/fix-share-perms/script",
+        "frequency": "disabled",
+        "id": "schedulefix-share-perms",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/check-drive-hours/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/check-drive-hours/script",
+        "frequency": "disabled",
+        "id": "schedulecheck-drive-hours",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/debug/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/debug/script",
+        "frequency": "disabled",
+        "id": "scheduledebug",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/test/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/test/script",
+        "frequency": "monthly",
+        "id": "scheduletest",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/viewDockerLogSize/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/viewDockerLogSize/script",
+        "frequency": "monthly",
+        "id": "scheduleviewDockerLogSize",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/clear-logspam/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/clear-logspam/script",
+        "frequency": "boot",
+        "id": "scheduleclear-logspam",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/delete_dangling_images/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/delete_dangling_images/script",
+        "frequency": "monthly",
+        "id": "scheduledelete_dangling_images",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/delete.ds_store/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/delete.ds_store/script",
+        "frequency": "monthly",
+        "id": "scheduledelete-ds_store",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/sort-apks/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/sort-apks/script",
+        "frequency": "disabled",
+        "id": "schedulesort-apks",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/sort-photos/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/sort-photos/script",
+        "frequency": "disabled",
+        "id": "schedulesort-photos",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/create-trees/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/create-trees/script",
+        "frequency": "disabled",
+        "id": "schedulecreate-trees",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/cd-tray/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/cd-tray/script",
+        "frequency": "disabled",
+        "id": "schedulecd-tray",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/create-playlists/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/create-playlists/script",
+        "frequency": "disabled",
+        "id": "schedulecreate-playlists",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/docker reset/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/docker reset/script",
+        "frequency": "disabled",
+        "id": "scheduledockerreset",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/mount-images/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/mount-images/script",
+        "frequency": "disabled",
+        "id": "schedulemount-images",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/mount-qemu-image/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/mount-qemu-image/script",
+        "frequency": "disabled",
+        "id": "schedulemount-qemu-image",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/stop-everything/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/stop-everything/script",
+        "frequency": "disabled",
+        "id": "schedulestop-everything",
+        "custom": ""
+    },
+    "/boot/config/plugins/user.scripts/scripts/vm-powerprofile/script": {
+        "script": "/boot/config/plugins/user.scripts/scripts/vm-powerprofile/script",
+        "frequency": "custom",
+        "id": "schedulevm-powerprofile",
+        "custom": "5,10,15,20,25,30,35,40,45,50,55 * * * *"
+    }
+}

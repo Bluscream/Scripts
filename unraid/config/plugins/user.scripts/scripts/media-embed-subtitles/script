@@ -1,0 +1,105 @@
+#!/bin/bash
+
+FOLDERS=(
+    "/mnt/user/media/Videos/TV Shows"
+    "/mnt/user/media/Videos/Movies"
+)
+
+MEDIA_EXTENSIONS=("mp3" "flac" "wav" "mp4" "mkv" "avi")
+# Example Media file: "/mnt/user/media/Videos/TV Shows/Suits LA/Suits LA S01E01 GERMAN 720p WEB h264-SAUERKRAUT.mp4"
+SUB_EXTENSIONS=("vtt")
+# Example Subtitle file: "/mnt/user/media/Videos/TV Shows/Suits LA/Suits LA S01E11 GERMAN 720p WEB h264-SAUERKRAUT_q9rcxmtp80yk_de.vtt"
+
+is_media_file() {
+    local file="$1"
+    for ext in "${MEDIA_EXTENSIONS[@]}"; do
+        if [[ "${file,,}" == *.$ext ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Arrays to hold all media and subtitle files
+ALL_MEDIA_FILES=()
+ALL_SUB_FILES=()
+
+for ROOT in "${FOLDERS[@]}"; do
+    echo "[SCAN] Root: \"$ROOT\""
+
+    # Build the -iname arguments for media files
+    MEDIA_FIND_ARGS=()
+    for ext in "${MEDIA_EXTENSIONS[@]}"; do
+        MEDIA_FIND_ARGS+=( -iname "*.${ext}" -o )
+    done
+    unset 'MEDIA_FIND_ARGS[${#MEDIA_FIND_ARGS[@]}-1]'  # Remove the last -o
+
+    # Build the -iname arguments for subtitle files
+    SUB_FIND_ARGS=()
+    for ext in "${SUB_EXTENSIONS[@]}"; do
+        SUB_FIND_ARGS+=( -iname "*.${ext}" -o )
+    done
+    unset 'SUB_FIND_ARGS[${#SUB_FIND_ARGS[@]}-1]'  # Remove the last -o
+
+    # Find all media files recursively and add to ALL_MEDIA_FILES
+    while IFS= read -r mediafile; do
+        ALL_MEDIA_FILES+=("$mediafile")
+    done < <(find "$ROOT" -type f \( "${MEDIA_FIND_ARGS[@]}" \) | sort)
+
+    # Find all subtitle files recursively and add to ALL_SUB_FILES
+    while IFS= read -r subfile; do
+        ALL_SUB_FILES+=("$subfile")
+    done < <(find "$ROOT" -type f \( "${SUB_FIND_ARGS[@]}" \) | sort)
+done
+
+echo "[DEBUG] Found ${#ALL_MEDIA_FILES[@]} media files in total."
+echo "[DEBUG] Found ${#ALL_SUB_FILES[@]} subtitle files in total."
+
+# Group subtitle files by their common prefix (before the last underscore and language code)
+declare -A SUB_GROUPS
+
+for subfile in "${ALL_SUB_FILES[@]}"; do
+    subdir="$(dirname "$subfile")"
+    subbase="$(basename "$subfile")"
+    # Remove extension
+    subname="${subbase%.*}"
+    # Find the last underscore (before language code)
+    prefix="${subname%_*}"
+    lang="${subname##*_}"
+    ext="${subbase##*.}"
+
+    # Use full path for grouping to avoid cross-folder collisions
+    groupkey="${subdir}/${prefix}"
+    SUB_GROUPS["$groupkey"]+="$subfile"$'\n'
+done
+
+for groupkey in "${!SUB_GROUPS[@]}"; do
+    IFS=$'\n' read -rd '' -a groupfiles <<< "${SUB_GROUPS[$groupkey]}"
+    # Only process if more than one subtitle in the group (i.e., multiple languages)
+    if (( ${#groupfiles[@]} > 1 )); then
+        # Create the target folder (if not exists)
+        targetdir="$groupkey"
+        mkdir -p "$targetdir"
+        for subfile in "${groupfiles[@]}"; do
+            subbase="$(basename "$subfile")"
+            subname="${subbase%.*}"
+            lang="${subname##*_}"
+            ext="${subbase##*.}"
+            # New path: targetdir/lang.ext (e.g., .../Suits LA S01E11 .../de.vtt)
+            newpath="${targetdir}/${lang}.${ext}"
+            if [[ "$subfile" != "$newpath" ]]; then
+                # Move the file if not already there
+                if [[ ! -e "$newpath" ]]; then
+                    echo "[MOVE] \"$subfile\" -> \"$newpath\""
+                    mv -- "$subfile" "$newpath"
+                else
+                    echo "[SKIP] \"$newpath\" already exists, skipping move for \"$subfile\""
+                fi
+            fi
+        done
+    fi
+done
+
+
+
+echo "[INFO] complete."

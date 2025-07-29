@@ -1,0 +1,83 @@
+#!/bin/bash
+
+FOLDERS=(
+    "/mnt/user/media/Videos/TV Shows"
+    "/mnt/user/media/Videos/Movies"
+)
+
+MEDIA_EXTENSIONS=("mp3" "flac" "wav" "mp4" "mkv" "avi" "vtt")
+
+is_media_file() {
+    local file="$1"
+    for ext in "${MEDIA_EXTENSIONS[@]}"; do
+        if [[ "${file,,}" == *.$ext ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Main logic
+for ROOT in "${FOLDERS[@]}"; do
+    echo "[SCAN] Root: \"$ROOT\""
+    find "$ROOT" -type d | while read -r SUBFOLDER; do
+        echo "[SCAN]  Subfolder: \"$SUBFOLDER\""
+        # Build the -iname arguments for find
+        FIND_ARGS=()
+        for ext in "${MEDIA_EXTENSIONS[@]}"; do
+            FIND_ARGS+=( -iname "*.${ext}" -o )
+        done
+        unset 'FIND_ARGS[${#FIND_ARGS[@]}-1]'  # Remove the last -o
+
+        # Find media files and fix their names
+        mapfile -t MEDIA_FILES < <(find "$SUBFOLDER" -maxdepth 1 -type f \( "${FIND_ARGS[@]}" \) | sort)
+        echo "[DEBUG]   Found ${#MEDIA_FILES[@]} media files in \"$SUBFOLDER\""
+        for foundfile in "${MEDIA_FILES[@]}"; do
+            filename="$(basename "$foundfile")"
+            dirname="$(dirname "$foundfile")"
+            # Extract extension (after last dot)
+            ext="${filename##*.}"
+            base="${filename%.*}"
+            # Only process if there's a dot (i.e., extension exists and is not the whole filename)
+            if [[ "$filename" != "$ext" ]]; then
+                # Replace all dots in base with spaces
+                newbase="${base//./ }"
+                newname="${newbase}.${ext}"
+
+                # --- NEW LOGIC: Prepend SxxxExxx if found ---
+                # Look for S(\d+)E(\d+) in the filename (case-insensitive)
+                if [[ "$filename" =~ ([sS])(\d+)[eE](\d+) ]]; then
+                    season="${BASH_REMATCH[2]}"
+                    episode="${BASH_REMATCH[3]}"
+                    # Pad with zeros to 3 digits
+                    season_padded=$(printf "%03d" "$season")
+                    episode_padded=$(printf "%03d" "$episode")
+                    prefix="S${season_padded}E${episode_padded}"
+                    # Only prepend if not already at the start
+                    if [[ ! "$newname" =~ ^${prefix} ]]; then
+                        newname="${prefix} - ${newname}"
+                    fi
+                    metadata="Original File Path: ${filename}, Season: ${season}, Episode: ${episode}"
+                    exiftool -overwrite_original -Comment="$metadata" "$filename"
+                fi
+                # --- END NEW LOGIC ---
+
+                # Only rename if the new name is different
+                if [[ "$filename" != "$newname" ]]; then
+                    newpath="${dirname}/${newname}"
+                    # Avoid overwriting existing files
+                    if [[ ! -e "$newpath" ]]; then
+                        echo "[RENAME] \"$foundfile\" -> \"$newpath\""
+                        mv -n -- "$foundfile" "$newpath"
+                    else
+                        echo "[SKIP] \"$newpath\" already exists, skipping rename for \"$foundfile\""
+                    fi
+                fi
+            fi
+        done
+    done
+done
+
+echo "[INFO] complete."
+
+bash /boot/config/plugins/user.scripts/scripts/create-playlists/script

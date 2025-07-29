@@ -1,0 +1,183 @@
+#!/bin/bash
+
+# UNRAID_PREP
+mkdir -p /var/log/user-scripts/
+chmod -R 0755 /var/log/user-scripts/
+un-get update -y
+un-get upgrade -y
+un-get install exiftool -y
+
+# Configuration
+SOURCE_DIR="/mnt/user/media/Pictures/Family/_UNSORTIERT/"
+TARGET_BASE="/mnt/user/media/Pictures/Family"
+
+# Enable debug mode and error handling
+# set -eu
+# PS4='LINENO:'
+# set -x
+
+has_arg() {
+    local arg="$1"
+    for i in "$@"; do
+        if [[ "$i" == "$arg" ]]; then
+            return 0  # Argument found
+        fi
+    done
+    return 1  # Argument not found
+}
+clean_dir() {
+    local dir="$1"
+    echo "Setting permissions to 0777 for $dir"
+    chmod -Rv 0777 "$dir"
+    echo "Setting owner to nobody:users for $dir"
+    chown -Rv nobody:users "$dir"
+    echo "Cleaning up empty files in $dir..."
+    find "$dir" -type f -size 0 -delete
+    echo "Deleting all '*.*_original' files in $dir..."
+    find "$dir" -type f -name "*.*_original" -delete
+    echo "Cleaning up empty directories in $dir..."
+    find "$dir" -type d -empty -delete
+    mkdir -p "$dir"
+    echo "Cleanup complete."
+}
+validate_file() {
+    local filepath="$1"
+    local abs_path="$(readlink -f "$filepath")"
+    
+    if [ ! -f "$abs_path" ]; then
+        echo "Error: File does not exist: $abs_path" >&2
+        return 1
+    fi
+    
+    if [ ! -r "$abs_path" ]; then
+        echo "Error: No read permission for $abs_path" >&2
+        return 1
+    fi
+    
+    return 0
+}
+get_file_date() {
+    local filepath="$1"
+    local abs_path="$(readlink -f "$filepath")"
+
+    if ! validate_file "$filepath"; then
+        return 1
+    fi
+
+    # Get raw exiftool output
+    date_str=$(exiftool -DateTimeOriginal "$abs_path")
+    
+    # Extract just the date portion (before the space)
+    if [[ $date_str =~ :[[:space:]]*(.*) ]]; then
+        date_value="${BASH_REMATCH[1]}"
+        # Convert YYYY:MM:DD HH:MM:SS to YYYY/MM/DD format
+        echo "${date_value%% *}" | sed 's/:/\//g'
+        return 0
+    fi
+    
+    # Fallback to modification time
+    mod_time=$(stat -c "%Y" "$abs_path")
+    if [ $? -ne 0 ]; then
+        echo "Error getting modification time for $abs_path" >&2
+        return 1
+    fi
+    
+    date -d @"$mod_time" "+%Y/%m/%d"
+}
+
+do_clean=1 # $(has_arg -clean)
+do_verify=1 # $(has_arg -verify)
+do_keep=0 # $(has_arg -keep)
+
+if [ "$do_clean" -eq 1 ]; then
+    clean_dir "$SOURCE_DIR"
+fi
+
+echo "MD5 Hash Verification: $do_verify"
+
+# Process files with improved error handling
+find "$SOURCE_DIR" -type f | while read -r filepath; do
+    echo "Processing file $filepath"
+    abs_src="$(readlink -f "$filepath")"
+    # echo "Absolute Source: $abs_src"
+    rel_src="${filepath#$SOURCE_DIR/}"
+    # echo "Relative Source: $rel_src"
+
+    # Skip if  file doesn't exist
+    if [ ! -f "$abs_src" ]; then
+        echo "Warning: File no longer exists: $rel_src, skipping..." >&2
+        continue
+    fi
+
+    creation_datetime=$(date -d @"$(stat -c "%Y" "$abs_src")" "+%Y-%m-%d %H:%M:%S")
+    if [ $? -ne 0 ]; then
+        echo "Error getting creation datetime for $abs_src" >&2
+        continue
+    fi
+    
+    date_str=$(get_file_date "$filepath")
+    if [ -z "$date_str" ] || [ "$date_str" == ":" ]; then
+        echo "Warning: Invalid date format for $rel_src, skipping..." >&2
+        continue
+    fi
+    # Print the date string for logging purposes
+    # echo "Date: $date_str"
+    IFS=/ read -r year month day <<< "$date_str"
+    target_dir="$TARGET_BASE/$year/$month/$day"
+    # echo "Target directory: $target_dir"
+    if ! mkdir -p "$target_dir"; then
+        echo "Unable to create target dir $target_dir" >&2
+        continue
+    fi
+    
+    md5_hash=$(md5sum "$filepath" | cut -d' ' -f1)
+    # echo "MD5: $md5_hash"
+    if [ -z "$md5_hash" ]; then
+        echo "Warning: No MD5 hash for $rel_src, skipping..." >&2
+        continue
+    fi
+    ext="${filepath##*.}"
+    ext="${ext:-$filepath}"
+    target_filename="${md5_hash}.${ext}"
+    target_path="$target_dir/$target_filename"
+    echo "=> $target_path"
+    
+    # echo "Copying $filepath to $target_path"
+    if ! cp -p "$filepath" "$target_path"; then
+        echo "Error copying $filepath to $target_path" >&2
+        continue
+    fi
+    
+    if [ "$do_verify" -eq 1 ]; then
+        # echo "Verifying MD5 Hash of $target_path"
+        target_md5=$(md5sum "$target_path" | cut -d' ' -f1)
+        if [ "$md5_hash" != "$target_md5" ]; then
+            echo "Error: MD5 verification failed for $target_path" >&2
+            rm -f "$target_path"
+            continue
+        fi
+    fi
+    
+    # echo "Adding Metadata to $target_path"
+    meta="{\"path\": \"$abs_src\",\"taken\": \"$date_str\",\"created\": \"$creation_datetime\",\"md5\": \"$md5_hash\"}"
+    if ! exiftool -overwrite_original "-Comment='$meta'" "$target_path" >&2; then
+        echo "Warning: Could not add metadata to $target_path" # >&2
+        metadata_file="$target_path.supplemental-metadata.json"
+        echo $meta > "$metadata_file"
+        echo "Metadata written to $metadata_file"
+
+    fi
+
+    # Set the creation date of the target file to the original creation_datetime
+    touch -d "$creation_datetime" "$target_path"
+
+    # Delete source file only after successful copy and verification
+    if [ "$do_keep" -eq 0 ]; then
+        if ! rm "$filepath"; then
+            echo "Error deleting source file $filepath" >&2
+            continue
+        fi
+    fi
+done
+
+clean_dir "$SOURCE_DIR"

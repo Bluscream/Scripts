@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Define source and destination paths as variables
+SOURCE_DEVICE="/dev/sdr"
+SOURCE_BLOCK_DEVICE=""
+
+DESTINATION_DIR="/mnt/user/backups/Timo/Server/HomeAssistant"
+DESTINATION_NAME="hass-sd_broken"
+DESTINATION_EXT=".img"
+DESTINATION_PATH="$DESTINATION_DIR/$DESTINATION_NAME"
+
+# Function to log messages
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+{
+    {
+        log_message "script: $0 $@"
+        echo "source device: $SOURCE_DEVICE"
+        echo "source block device: $SOURCE_BLOCK_DEVICE"
+        echo "destination path: $DESTINATION_PATH"
+        echo
+        echo "===== lsscsi ====="
+        lsscsi
+        echo
+        echo "===== df ====="
+        df -h
+        echo
+        echo "===== fdisk ====="
+        fdisk -l "$SOURCE_DEVICE"
+        echo
+        echo "===== lsblk ====="
+        lsblk -o name,label,size,fstype,model,mountpoint "$SOURCE_DEVICE"
+        echo
+        echo "===== ls /dev/block/* ====="
+        if compgen -G "/dev/block/*" > /dev/null; then
+            ls -la "/dev/block/"*
+        else
+            echo "No files found in /dev/block/"
+        fi
+    } > "$DESTINATION_DIR/$DESTINATION_NAME.txt"
+}
+
+# Function to get device size in bytes
+get_device_size() {
+    local device="$1"
+    if [ -b "$device" ]; then
+        cat /sys/block/$(basename "$device")/size 2>/dev/null | awk '{print $1 * 512}'
+    else
+        echo "0"
+    fi
+}
+
+# Try qemu-img first
+log_message "Attempting disk imaging with qemu-img..."
+DESTINATION_PATH="${DESTINATION_PATH}_qemu${DESTINATION_EXT}"
+log_message "QEMU Destination file: $DESTINATION_PATH"
+if [ -e "$DESTINATION_PATH" ]; then
+    log_message "WARNING: Destination file '$DESTINATION_PATH' already exists and will be overwritten."
+fi
+
+if qemu-img convert -p -O raw "$SOURCE_DEVICE" "$DESTINATION_PATH"; then
+    log_message "qemu-img completed successfully!"
+    exit 0
+else
+    log_message "qemu-img failed, trying dd..."
+fi
+
+# Try dd as fallback
+log_message "Attempting disk imaging with dd..."
+DEVICE_SIZE=$(get_device_size "$SOURCE_DEVICE")
+if [ "$DEVICE_SIZE" -gt 0 ]; then
+    DESTINATION_PATH="${DESTINATION_PATH}_dd${DESTINATION_EXT}"
+    log_message "DD Destination file: $DESTINATION_PATH"
+    if [ -e "$DESTINATION_PATH" ]; then
+        log_message "WARNING: Destination file '$DESTINATION_PATH' already exists and will be overwritten."
+    fi
+    if dd if="$SOURCE_DEVICE" of="$DESTINATION_PATH" bs=1M status=progress conv=noerror,sync; then
+        log_message "dd completed successfully!"
+        exit 0
+    else
+        log_message "dd failed, trying ddrescue..."
+    fi
+else
+    log_message "Could not determine device size, trying ddrescue..."
+fi
+
+# Try ddrescue as final fallback
+log_message "Attempting disk imaging with ddrescue..."
+if command -v ddrescue >/dev/null 2>&1; then
+    DESTINATION_PATH="${DESTINATION_PATH}_ddrescue${DESTINATION_EXT}"
+    log_message "DDRESCUE Destination file: $DESTINATION_PATH"
+    if [ -e "$DESTINATION_PATH" ]; then
+        log_message "WARNING: Destination file '$DESTINATION_PATH' already exists and will be overwritten."
+    fi
+    if ddrescue -v "$SOURCE_DEVICE" "$DESTINATION_PATH" /tmp/ddrescue.log; then
+        log_message "ddrescue completed successfully!"
+        exit 0
+    else
+        log_message "ddrescue failed!"
+        exit 1
+    fi
+else
+    log_message "ddrescue not available!"
+    if [ -n "$SOURCE_BLOCK_DEVICE" ]; then
+        log_message "Using SOURCE_BLOCK_DEVICE: $SOURCE_BLOCK_DEVICE for imaging..."
+        DESTINATION_PATH="${DESTINATION_PATH}_block${DESTINATION_EXT}"
+        log_message "Block Device Destination file: $DESTINATION_PATH"
+        if [ -e "$DESTINATION_PATH" ]; then
+            log_message "WARNING: Destination file '$DESTINATION_PATH' already exists and will be overwritten."
+        fi
+        if dd if="$SOURCE_BLOCK_DEVICE" of="$DESTINATION_PATH" bs=1M status=progress conv=noerror,sync; then
+            log_message "Imaging from block device completed successfully!"
+            exit 0
+        else
+            log_message "Imaging from block device failed!"
+        fi
+    fi
+    exit 1
+fi
+
+ls -lh "$DESTINATION_DIR/*.img"

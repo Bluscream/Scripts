@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# Set source directory
+SOURCE_DIR="/mnt/user/images/APK/_UNSORTED"
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Download directory for tools
+TOOLS_DIR="$SCRIPT_DIR/tools"
+mkdir -p "$TOOLS_DIR"
+
+# Function to check if aapt is available
+check_aapt() {
+    if command -v aapt &> /dev/null; then
+        return 0
+    fi
+    echo "aapt not found in PATH"
+    return 1
+}
+
+# Function to download and extract build-tools
+download_build_tools() {
+    # Download URL for Android SDK build tools
+    BUILD_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-8092744_latest.zip"
+    
+    # Create tools directory if needed
+    mkdir -p "$TOOLS_DIR"
+    
+    # Download file
+    cd "$TOOLS_DIR"
+    echo "Downloading Android build tools..."
+    wget -q --show-progress "$BUILD_TOOLS_URL" || { echo "Failed to download build tools"; exit 1; }
+    
+    # Extract zip
+    unzip commandlinetools-linux-* -d .
+    
+    # Find and move build-tools to tools directory
+    BUILD_TOOLS_PATH=$(find . -name "build-tools")
+    if [ -n "$BUILD_TOOLS_PATH" ]; then
+        mv "$BUILD_TOOLS_PATH"/* "$SCRIPT_DIR/tools/"
+        rm -rf "$BUILD_TOOLS_PATH"
+    fi
+    
+    # Clean up
+    rm commandlinetools-linux-*.zip
+}
+
+# Main script starts here
+echo "Checking for required tools..."
+
+# Check and install aapt if necessary
+if ! check_aapt; then
+    echo "Installing aapt..."
+    download_build_tools
+    export PATH="$SCRIPT_DIR/tools:$PATH"
+fi
+
+# Verify installation
+if ! check_aapt; then
+    echo "Error: Failed to install aapt properly"
+    exit 1
+fi
+
+# Check if source directory exists
+if [ ! -d "$SOURCE_DIR" ]; then
+    echo "Error: Source directory $SOURCE_DIR does not exist"
+    exit 1
+fi
+
+# Process each APK file
+for apk_path in "$SOURCE_DIR"/*.apk; do
+    # Skip if no APK files found
+    if [ "$apk_path" = "$SOURCE_DIR"/*.apk ]; then
+        echo "No APK files found in $SOURCE_DIR"
+        break
+    fi
+    
+    # Get filename without path
+    filename=$(basename "$apk_path")
+    
+    # Extract package name and version from APK metadata
+    package_name=$(aapt dump badging "$apk_path" | grep "package:" | cut -d "'" -f 2)
+    version_name=$(aapt dump badging "$apk_path" | grep "versionName=" | cut -d "'" -f 2)
+    
+    # Calculate MD5 checksum
+    md5_checksum=$(md5sum "$apk_path" | cut -d ' ' -f 1)
+    
+    # Create destination path
+    dest_path="/mnt/user/images/APK/$package_name/$version_name"
+    
+    # Create directories if they don't exist
+    mkdir -p "$dest_path"
+    
+    # Copy APK to new location
+    cp -p "$apk_path" "$dest_path/$md5_checksum.apk"
+    
+    echo "Processed: $filename"
+    echo "Package: $package_name"
+    echo "Version: $version_name"
+    echo "MD5: $md5_checksum"
+    echo "---"
+done

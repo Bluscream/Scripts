@@ -1,0 +1,19 @@
+#!/bin/bash
+
+CONTAINER="nginx-php-api"
+
+while true; do
+    status=$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)
+    if [ "$status" != "true" ]; then
+        echo "$(date): $CONTAINER is not running. Attempting to start..."
+        docker start "$CONTAINER"
+        status=$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)
+        if [ "$status" != "true" ]; then
+            echo "$(date): Failed to start $CONTAINER. Exiting."
+            exit 1
+        else
+            echo "$(date): $CONTAINER started successfully."
+        fi
+    fi
+    sleep 30
+done

@@ -1,0 +1,32 @@
+#!/bin/bash
+
+basedir="/mnt/user/appdata/nginxphp8/www"
+tree_script="/usr/local/bin/scripts/tree.sh"
+
+# Verify base directory exists
+if [ ! -d "$basedir" ]; then
+    echo "Error: Base directory '$basedir' does not exist" >&2
+    exit 1
+fi
+
+# Verify tree script exists
+if [ ! -f "$tree_script" ] || [ ! -x "$tree_script" ]; then
+    echo "Error: Tree script '$tree_script' must exist and be executable" >&2
+    exit 1
+fi
+
+# Loop through all first-level subdirectories
+for dir in "$basedir"/*/; do
+    # Remove trailing slash for consistent processing
+    full_path="${dir%/}"
+    
+    # Check if it's actually a directory
+    if [ -d "$full_path" ]; then
+        echo "Processing directory: $full_path"
+        
+        # Execute tree script with nice priority
+        if ! nice -n 10 "$tree_script" "$full_path"; then
+            echo "Warning: Failed to process $full_path" >&2
+        fi
+    fi
+done

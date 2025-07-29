@@ -1,0 +1,20 @@
+#!/bin/bash
+# the valid scaling governors are performance, powersave, userspace, ondemand, conservative, and schedutil
+# here's a good article on cpu frequency scaling if you want to go down the rabbit hole of all that's possible
+# https://wiki.archlinux.org/title/CPU_frequency_scaling
+powersave="powersave" # this is the scaling that will be set when no VMs are running
+performance="ondemand" # this is the scaling that will be set when one or more VMs are running
+vms=$(virsh list | grep running | wc -l) # lists the active VMs, discards the entries not running and counts the instances
+#vms=$(docker ps | grep steam-headless | wc -l) # lists the active steam-headless containers
+governor=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | uniq) # this is the current scaling
+# it is possible to set different scaling for specific cores; this script does not account for this
+if [[ $vms -gt 0 && "$governor" == "$powersave" ]]; then
+# one or more VMs are in a running state and the governor is set to powersave
+# set the power mode to performance
+echo $performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+elif [[ $vms -eq 0 && "$governor" == "$performance" ]] ; then
+# no VMs are in a running state and the governor is set to performance
+# set the power mode to powersave
+echo $powersave | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+# else echo "doing nothing"
+fi 

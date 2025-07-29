@@ -1,0 +1,49 @@
+[
+    {
+        "name": "backup",
+        "order": 1,
+        "view_mode": "list",
+        "collapsed": "no",
+        "scripts": [
+            "namebackup-docker",
+            "nameimage-disk"
+        ]
+    },
+    {
+        "name": "fixes",
+        "order": 2,
+        "view_mode": "list",
+        "collapsed": "no",
+        "scripts": [
+            "namedns-fix",
+            "namefix-nginx",
+            "namefix-share-perms"
+        ]
+    },
+    {
+        "name": "debug",
+        "order": 3,
+        "view_mode": "list",
+        "collapsed": "yes",
+        "scripts": [
+            "namecheck-drive-hours",
+            "namedebug",
+            "nametest",
+            "nameviewDockerLogSize"
+        ]
+    },
+    {
+        "name": "cleanup",
+        "order": 4,
+        "view_mode": "list",
+        "collapsed": "no",
+        "scripts": [
+            "nameclear-logspam",
+            "namedelete_dangling_images",
+            "namedelete-ds_store",
+            "namesort-apks",
+            "namesort-photos",
+            "namecreate-trees"
+        ]
+    }
+]

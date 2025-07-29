@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Docker stop $(docker ps -aq)
+/etc/rc.d/rc.docker stop
+mkdir -p "/mnt/disk1/backups/docker/"
+rsync "/mnt/user/system/docker/docker.img" "/mnt/disk1/backups/docker/docker.img"
+/etc/rc.d/rc.docker start
+# --info=progress2 --progress

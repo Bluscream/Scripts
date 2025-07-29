@@ -1,0 +1,36 @@
+#!/bin/bash
+
+SCRIPT_PATH="/boot/config/plugins/user.scripts/scripts/mount-qemu-image/script"
+if [[ ! -f "$SCRIPT_PATH" ]]; then
+    echo "Error: Mount script not found at $SCRIPT_PATH"
+    exit 1
+fi
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root (use sudo)"
+    exit 1
+fi
+
+mount_image() {
+    echo "=== Mounting $1 ==="
+    # bash "$SCRIPT_PATH" info --image "$1"
+    bash "$SCRIPT_PATH" mount --image "$1" --partition "$2" --readonly &
+    echo "   Background process started (PID: $!)"
+    echo
+}
+
+bash "$SCRIPT_PATH" unmount
+rm -rf /mnt/images/*/
+
+# Mount specific partitions using their actual labels
+mount_image "/mnt/user/backups/Timo/PC/Drives/blu-pc.img" "Win 11 Pro"
+mount_image "/mnt/user/backups/Bettina/Laptop/drives/betty-laptop.img" "Windows"
+mount_image "/mnt/user/backups/Timo/Server/HomeAssistant/HASS_USB.img" "hassos-data"
+# mount_image "/mnt/user/backups/Timo/Server/HomeAssistant/hass-sd_broken.img" "HomeAssistant SD"
+
+echo "=== All mount operations started in background ==="
+echo "Each mount process is waiting for Enter key to unmount"
+echo "To unmount all disks at once, run: $SCRIPT_PATH unmount"
+echo "To check mounted disks, run: $SCRIPT_PATH list"
+echo
+echo "Background processes:"
+jobs
