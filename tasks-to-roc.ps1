@@ -1201,13 +1201,13 @@ function Load-StartupTasks {
     .OUTPUTS
         [ApplicationEntry[]]
     #>
-    Write-Host "Loading startup tasks..."
+    Write-Host "Loading startup tasks..." -ForegroundColor Blue
     # Initialize applications array
     $validApplications = @()
     
     # Process scheduled tasks if -StartupTasks is specified
     if ($Tasks) {
-        Write-Host "Loading startup tasks (Boot/Logon triggers, enabled only)..." -ForegroundColor Green
+        Write-Host "Loading startup tasks (Boot/Logon triggers, enabled only)..." -ForegroundColor Blue
         
         # Define task paths to scan
         $taskPaths = @(
@@ -1361,7 +1361,7 @@ function Load-StartupTasks {
             Write-Host "  Tasks failed to disable: $failedDisableCount" -ForegroundColor Red
         }
     }
-    Write-Host "Loaded $($validApplications.Count) startup tasks"
+    Write-Host "Loaded $($validApplications.Count) startup tasks" -ForegroundColor Green
     return $validApplications
 }
 
@@ -1374,7 +1374,7 @@ function Load-StartupScripts {
     .OUTPUTS
         [ApplicationEntry[]]
     #>
-    Write-Host "Loading startup scripts..."
+    Write-Host "Loading startup scripts..." -ForegroundColor Blue
     $entries = @()
 
     # Common locations for logon scripts
@@ -1416,7 +1416,7 @@ function Load-StartupScripts {
             }
         }
     }
-    Write-Host "Loaded $($entries.Count) startup scripts"
+    Write-Host "Loaded $($entries.Count) startup scripts" -ForegroundColor Green
     return $entries
 }
 function Load-StartupRegistry {
@@ -1429,7 +1429,7 @@ function Load-StartupRegistry {
     .OUTPUTS
         [ApplicationEntry[]]
     #>
-    Write-Host "Loading startup registry entries..."
+    Write-Host "Loading startup registry entries..." -ForegroundColor Blue
     $runKeys = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
@@ -1474,7 +1474,7 @@ function Load-StartupRegistry {
             }
         }
     }
-    Write-Host "Loaded $($entries.Count) startup registry entries"
+    Write-Host "Loaded $($entries.Count) startup registry entries" -ForegroundColor Green
     return $entries
 }
 
@@ -1488,7 +1488,7 @@ function Load-StartupFiles {
     .OUTPUTS
         [ApplicationEntry[]]
     #>
-    Write-Host "Loading startup files..."
+    Write-Host "Loading startup files..." -ForegroundColor Blue
     $startupFolders = @(
         [Environment]::GetFolderPath("Startup"),
         [Environment]::GetFolderPath("CommonStartup")
@@ -1529,7 +1529,7 @@ function Load-StartupFiles {
         $entry.Triggers = "Logon"
         $entries += $entry
     }
-    Write-Host "Loaded $($entries.Count) startup files"
+    Write-Host "Loaded $($entries.Count) startup files" -ForegroundColor Green
     return $entries
 }
 
