@@ -18,8 +18,10 @@
      Skip automatic elevation to administrator privileges.
      
  .PARAMETER StartupTasks
-     Only process scheduled tasks that are triggered on Boot or Logon and are enabled.
+     Process scheduled tasks that are triggered on Boot or Logon and are enabled.
      This is equivalent to using -Triggers Boot,Logon -EnabledOnly.
+     If not specified, no scheduled tasks will be processed.
+     Note: This parameter is required to process any startup-related items.
      
  .PARAMETER DisableTasks
      Stop and disable the scheduled tasks after successful conversion (requires administrator privileges).
@@ -44,14 +46,12 @@
      Include logon scripts from Group Policy and registry.
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -OutputPath "C:\temp\restart-on-crash.ini"
-     
-
+     .\tasks-to-roc.ps1 -StartupTasks -OutputPath "C:\temp\restart-on-crash.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -NoElevate -OutputPath "C:\temp\restart-on-crash.ini"
+     .\tasks-to-roc.ps1 -StartupTasks -NoElevate -OutputPath "C:\temp\restart-on-crash.ini"
      
- .EXAMPLE
+  .EXAMPLE
      .\tasks-to-roc.ps1 -StartupTasks -OutputPath "C:\temp\startup-tasks.ini"
      
  .EXAMPLE
@@ -79,11 +79,11 @@
 param(
     [string]$OutputPath = ".\restart-on-crash.ini",
     [switch]$NoElevate,
-    [switch]$StartupTasks,
     [switch]$DisableTasks,
     [switch]$Merge,
     [switch]$WriteExtra,
     [string[]]$Ignore = @(),
+    [switch]$StartupTasks,
     [switch]$StartupFiles,
     [switch]$StartupRegistry,
     [switch]$StartupLogonScripts
@@ -379,69 +379,7 @@ function Show-ApplicationSummary {
     }
 }
 
-# Function to stop and disable scheduled tasks
-function Stop-AndDisable-ScheduledTasks {
-    param([array]$TaskObjects)
-    
-    Write-Host "`nStopping and disabling scheduled tasks..." -ForegroundColor Yellow
-    
-    $stoppedCount = 0
-    $disabledCount = 0
-    $failedCount = 0
-    
-    foreach ($task in $TaskObjects) {
-        try {
-            # Get the task name from the ScheduledTask object
-            $taskName = $task.Name
-            
-            Write-Host "  Processing: $($task.ToString())" -ForegroundColor Gray
-            
-            # First, try to stop the task if it's running
-            try {
-                $runningTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-                if ($runningTask -and $runningTask.State -eq "Running") {
-                    Write-Host "    Stopping running task..." -ForegroundColor Yellow
-                    Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    Write-Host "    Stopped: $taskName" -ForegroundColor Green
-                    $stoppedCount++
-                }
-                else {
-                    Write-Host "    Task not running, skipping stop" -ForegroundColor Gray
-                }
-            }
-            catch {
-                Write-Host "    Warning: Could not stop task - $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-            
-            # Then disable the task
-            try {
-                Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                Write-Host "    Disabled: $taskName" -ForegroundColor Green
-                $disabledCount++
-            }
-            catch {
-                Write-Host "    Failed to disable: $taskName - $($_.Exception.Message)" -ForegroundColor Red
-                $failedCount++
-            }
-            
-        }
-        catch {
-            Write-Host "  Error processing: $($task.ToString()) - $($_.Exception.Message)" -ForegroundColor Red
-            $failedCount++
-        }
-    }
-    
-    Write-Host "`nTask processing summary:" -ForegroundColor Yellow
-    Write-Host "  Successfully stopped: $stoppedCount" -ForegroundColor Green
-    Write-Host "  Successfully disabled: $disabledCount" -ForegroundColor Green
-    Write-Host "  Failed to process: $failedCount" -ForegroundColor Red
-    
-    return @{
-        StoppedCount  = $stoppedCount
-        DisabledCount = $disabledCount
-        FailedCount   = $failedCount
-    }
-}
+
 
 # Function to get working directory from executable path
 function Get-WorkingDirectory {
@@ -456,64 +394,223 @@ function Get-WorkingDirectory {
 function Load-StartupTasks {
     <#
     .SYNOPSIS
-        Loads scheduled tasks that are triggered on Boot or Logon and are enabled.
+        Loads all startup-related tasks and applications.
     .DESCRIPTION
-        Scans all scheduled tasks and returns only those that have Boot or Logon triggers and are enabled.
+        Scans scheduled tasks that are triggered on Boot or Logon and are enabled.
+        Also scans startup files, registry entries, and logon scripts if specified.
         This function forces -Triggers Boot,Logon and -EnabledOnly parameters internally.
+        If -DisableTasks is specified, tasks are disabled directly during loading.
     .OUTPUTS
-        [ScheduledTask[]]
+        [ApplicationEntry[]]
     #>
     
-    Write-Host "Loading startup tasks (Boot/Logon triggers, enabled only)..." -ForegroundColor Green
+    # Initialize applications array
+    $validApplications = @()
     
-    # Define task paths to scan
-    $taskPaths = @(
-        "$env:SystemRoot\System32\Tasks",
-        "$env:SystemRoot\Tasks"
-    )
+    # Process scheduled tasks if -StartupTasks is specified
+    if ($StartupTasks) {
+        Write-Host "Loading startup tasks (Boot/Logon triggers, enabled only)..." -ForegroundColor Green
+        
+        # Define task paths to scan
+        $taskPaths = @(
+            "$env:SystemRoot\System32\Tasks",
+            "$env:SystemRoot\Tasks"
+        )
+        
+        # Add user-specific task paths
+        $userProfiles = Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+        foreach ($user in $userProfiles) {
+            $userTaskPath = "$($user.FullName)\AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs"
+            if (Test-Path $userTaskPath) {
+                $taskPaths += $userTaskPath
+            }
+        }
+        
+        # Scan for task XML files
+        $taskXmlFiles = Get-TaskXmlFiles -TaskPaths $taskPaths
+        Write-Host "Found $($taskXmlFiles.Count) total task files" -ForegroundColor Yellow
+        
+        # Force specific triggers and enabled only
+        $forcedTriggers = @("Boot", "Logon")
+        $forcedEnabledOnly = $true
+        
+        Write-Host "Filtering tasks to only include triggers: $($forcedTriggers -join ', ')" -ForegroundColor Cyan
+        Write-Host "Filtering tasks to only include enabled tasks" -ForegroundColor Cyan
+        
+        if ($DisableTasks) {
+            Write-Host "WARNING: Tasks will be stopped and disabled after successful conversion!" -ForegroundColor Red
+            Write-Host "This action cannot be undone automatically. Use with caution." -ForegroundColor Red
+        }
+        
+        # Convert tasks to application format
+        $processedCount = 0
+        $disabledCount = 0
+        $failedDisableCount = 0
     
-    # Add user-specific task paths
-    $userProfiles = Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
-    foreach ($user in $userProfiles) {
-        $userTaskPath = "$($user.FullName)\AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs"
-        if (Test-Path $userTaskPath) {
-            $taskPaths += $userTaskPath
+        foreach ($xmlFile in $taskXmlFiles) {
+            $processedCount++
+            if ($processedCount % 50 -eq 0) {
+                Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
+            }
+        
+            try {
+                # Parse the XML file
+                $xmlContent = Get-Content $xmlFile.FullName -Raw -ErrorAction SilentlyContinue
+                if (-not $xmlContent) { continue }
+            
+                # Create XML object
+                $xml = [xml]$xmlContent
+            
+                # Extract task path from the XML file path
+                $taskPath = $xmlFile.FullName
+                if ($taskPath -like "*\System32\Tasks\*") {
+                    $taskPath = $taskPath -replace ".*\\System32\\Tasks", ""
+                }
+                elseif ($taskPath -like "*\Tasks\*") {
+                    $taskPath = $taskPath -replace ".*\\Tasks", ""
+                }
+                elseif ($taskPath -like "*\ScheduledJobs\*") {
+                    $taskPath = $taskPath -replace ".*\\ScheduledJobs", ""
+                }
+            
+                # Check if task should be ignored
+                if (Test-TaskShouldBeIgnored -TaskPath $taskPath -IgnorePatterns $Ignore) {
+                    continue
+                }
+            
+                # Check if task is enabled (if EnabledOnly is specified)
+                if ($forcedEnabledOnly -and -not (Test-TaskIsEnabled -Xml $xml)) {
+                    continue
+                }
+            
+                # Extract executable path and arguments
+                $execInfo = Get-ExecutablePathAndArgsFromXml -Xml $xml
+                $executablePath = $execInfo.ExecutablePath
+                $arguments = $execInfo.Arguments
+            
+                # Skip if no executable found
+                if (-not $executablePath) { continue }
+            
+                # Skip RestartOnCrash.exe
+                if ($executablePath -ilike "*RestartOnCrash.exe*") { continue }
+            
+                # Verify executable exists
+                if (-not [System.IO.File]::Exists($executablePath)) { continue }
+            
+                # Extract working directory
+                $workingDirectory = Get-WorkingDirectory -ExecutablePath $executablePath
+            
+                # Extract triggers
+                $taskTriggers = Get-TriggersFromXml -Xml $xml
+            
+                # Check if task has specified triggers
+                if ($forcedTriggers.Count -gt 0) {
+                    $hasMatchingTrigger = $false
+                    foreach ($trigger in $taskTriggers) {
+                        if ($forcedTriggers -contains $trigger) {
+                            $hasMatchingTrigger = $true
+                            break
+                        }
+                    }
+                    if (-not $hasMatchingTrigger) { continue }
+                }
+            
+                # Create ApplicationEntry object with default settings
+                $app = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
+            
+                # Set basic properties
+                $app.FileName = [System.IO.Path]::GetFileName($executablePath)
+                $app.Command = if ($arguments) { "`"$executablePath`" $arguments" } else { "`"$executablePath`"" }
+                $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory
+            
+                # Set triggers
+                if ($taskTriggers.Count -gt 0) {
+                    $app.Triggers = $taskTriggers -join ","
+                }
+                else {
+                    $app.Triggers = ""
+                }
+            
+                # Apply application-specific overrides if they exist
+                if ($Script:AppOverrides.ContainsKey($executablePath)) {
+                    $app.ApplyOverrides($Script:AppOverrides[$executablePath])
+                }
+            
+                $validApplications += $app
+            
+                # Disable task if requested
+                if ($DisableTasks) {
+                    $taskName = $xmlFile.Name
+                    if (Disable-SingleScheduledTask -TaskName $taskName -TaskPath $taskPath) {
+                        $disabledCount++
+                    }
+                    else {
+                        $failedDisableCount++
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Error processing task $($xmlFile.Name): $($_.Exception.Message)"
+            }
+        }
+    
+        Write-Host "Startup tasks processing summary:" -ForegroundColor Yellow
+        Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
+        Write-Host "  Valid startup applications found: $($validApplications.Count)" -ForegroundColor White
+    
+        if ($DisableTasks) {
+            Write-Host "  Tasks successfully disabled: $disabledCount" -ForegroundColor Green
+            Write-Host "  Tasks failed to disable: $failedDisableCount" -ForegroundColor Red
         }
     }
     
-    # Scan for task XML files
-    $taskXmlFiles = Get-TaskXmlFiles -TaskPaths $taskPaths
-    Write-Host "Found $($taskXmlFiles.Count) total task files" -ForegroundColor Yellow
-    
-    # Force specific triggers and enabled only
-    $forcedTriggers = @("Boot", "Logon")
-    $forcedEnabledOnly = $true
-    
-    Write-Host "Filtering tasks to only include triggers: $($forcedTriggers -join ', ')" -ForegroundColor Cyan
-    Write-Host "Filtering tasks to only include enabled tasks" -ForegroundColor Cyan
-    
-    # Convert tasks to application format
-    $validTasks = @()
-    $processedCount = 0
-    
-    foreach ($xmlFile in $taskXmlFiles) {
-        $processedCount++
-        if ($processedCount % 50 -eq 0) {
-            Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
+    # Scan for startup entries if requested
+    if ($StartupFiles -or $StartupRegistry -or $StartupLogonScripts) {
+        Write-Host "`nScanning startup entries..." -ForegroundColor Green
+        
+        if ($StartupFiles) {
+            Write-Host "Scanning startup files..." -ForegroundColor Cyan
+            $startupFiles = Get-StartupFiles
+            Write-Host "Found $($startupFiles.Count) startup files" -ForegroundColor Yellow
+            
+            foreach ($startupFile in $startupFiles) {
+                $startupApp = Convert-StartupEntryToApplicationEntry -StartupEntry $startupFile
+                if ($startupApp) {
+                    $validApplications += $startupApp
+                }
+            }
         }
         
-        $taskObject = Process-TaskXmlFile -XmlFile $xmlFile -ProcessedCount $processedCount -SpecifiedTriggers $forcedTriggers -EnabledOnly $forcedEnabledOnly -IgnorePatterns $Ignore
-        
-        if ($taskObject) {
-            $validTasks += $taskObject
+        if ($StartupRegistry) {
+            Write-Host "Scanning startup registry entries..." -ForegroundColor Cyan
+            $startupRegistry = Get-StartupRegistry
+            Write-Host "Found $($startupRegistry.Count) startup registry entries" -ForegroundColor Yellow
+            
+            foreach ($registryEntry in $startupRegistry) {
+                $startupApp = Convert-StartupEntryToApplicationEntry -StartupEntry $registryEntry
+                if ($startupApp) {
+                    $validApplications += $startupApp
+                }
+            }
         }
+        
+        if ($StartupLogonScripts) {
+            Write-Host "Scanning logon scripts..." -ForegroundColor Cyan
+            $logonScripts = Get-StartupLogonScripts
+            Write-Host "Found $($logonScripts.Count) logon scripts" -ForegroundColor Yellow
+            
+            foreach ($logonScript in $logonScripts) {
+                $startupApp = Convert-StartupEntryToApplicationEntry -StartupEntry $logonScript
+                if ($startupApp) {
+                    $validApplications += $startupApp
+                }
+            }
+        }
+        
+        Write-Host "Total valid applications after startup scanning: $($validApplications.Count)" -ForegroundColor Yellow
     }
     
-    Write-Host "Startup tasks processing summary:" -ForegroundColor Yellow
-    Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
-    Write-Host "  Valid startup tasks found: $($validTasks.Count)" -ForegroundColor White
-    
-    return $validTasks
+    return $validApplications
 }
 
 function Load-StartupLogonScripts {
@@ -569,22 +666,11 @@ function Load-StartupLogonScripts {
             # Also enumerate all .bat, .cmd, .ps1, .vbs files in the directory
             $scriptFiles = Get-ChildItem -Path $dir -File -Include *.bat, *.cmd, *.ps1, *.vbs -ErrorAction SilentlyContinue
             foreach ($file in $scriptFiles) {
-                $settings = @{
-                    FileName             = $file.FullName
-                    WindowTitle          = ""
-                    Enabled              = 1
-                    Command              = "`"$($file.FullName)`""
-                    WorkingDirectory     = $file.DirectoryName
-                    CommandEnabled       = 1
-                    CrashNotResponding   = 1
-                    CrashNotRunning      = 0
-                    KillIfHanged         = 1
-                    CloseProblemReporter = 1
-                    DelayEnabled         = 1
-                    CrashDelay           = 60
-                    Triggers             = if ($dir -like "*Startup") { "Boot" } else { "Logon" }
-                }
-                $entry = [ApplicationEntry]::new($settings, $Script:DefaultAppSettings)
+                $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
+                $entry.FileName = $file.FullName
+                $entry.Command = "`"$($file.FullName)`""
+                $entry.WorkingDirectory = $file.DirectoryName
+                $entry.Triggers = if ($dir -like "*Startup") { "Boot" } else { "Logon" }
                 $entries += $entry
             }
         }
@@ -636,23 +722,13 @@ function Load-StartupRegistry {
 
                 $workingDir = [System.IO.Path]::GetDirectoryName($exePath)
 
-                $settings = @{
-                    FileName             = $exePath
-                    WindowTitle          = ""
-                    Enabled              = 1
-                    Command              = if ($arguments) { "`"$exePath`" $arguments" } else { "`"$exePath`"" }
-                    WorkingDirectory     = $workingDir
-                    CommandEnabled       = 1
-                    CrashNotResponding   = 1
-                    CrashNotRunning      = 0
-                    KillIfHanged         = 1
-                    CloseProblemReporter = 1
-                    DelayEnabled         = 1
-                    CrashDelay           = 60
-                    Triggers             = "Logon"
-                }
-
-                $entry = [ApplicationEntry]::new($settings, $null)
+                # Create entry with default settings first, then overwrite with actual values
+                $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
+                $entry.FileName = $exePath
+                $entry.Command = if ($arguments) { "`"$exePath`" $arguments" } else { "`"$exePath`"" }
+                $entry.WorkingDirectory = $workingDir
+                $entry.Triggers = "Logon"
+                $entry.CrashDelay = 60
                 $entries += $entry
             }
         }
@@ -704,22 +780,11 @@ function Load-StartupFiles {
             continue
         }
 
-        $settings = @{
-            FileName             = $targetPath
-            WindowTitle          = ""
-            Enabled              = 1
-            Command              = if ($arguments) { "`"$targetPath`" $arguments" } else { "`"$targetPath`"" }
-            WorkingDirectory     = $workingDir
-            CommandEnabled       = 1
-            CrashNotResponding   = 1
-            CrashNotRunning      = 0
-            KillIfHanged         = 1
-            CloseProblemReporter = 1
-            DelayEnabled         = 1
-            CrashDelay           = 60
-            Triggers             = "Logon"
-        }
-        $entry = [ApplicationEntry]::new($settings, $Script:DefaultAppSettings)
+        $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
+        $entry.FileName = $targetPath
+        $entry.Command = if ($arguments) { "`"$targetPath`" $arguments" } else { "`"$targetPath`"" }
+        $entry.WorkingDirectory = $workingDir
+        $entry.Triggers = "Logon"
         $entries += $entry
     }
     return $entries
@@ -870,6 +935,120 @@ function Test-TaskIsEnabled {
     return $true
 }
 
+# Function to extract executable path and arguments from XML task
+function Get-ExecutablePathAndArgsFromXml {
+    param([object]$Xml)
+    
+    $executablePath = $null
+    $arguments = $null
+    
+    # Look for executable and arguments in various possible locations
+    if ($Xml.Task.Actions.Exec.Command) {
+        $command = $Xml.Task.Actions.Exec.Command
+        $args = $Xml.Task.Actions.Exec.Arguments
+        
+        # Remove any existing quotes from the XML
+        $executablePath = $command -replace '^"|"$', ''
+        
+        # Get arguments if present
+        if ($args) {
+            $arguments = $args
+        }
+    }
+    elseif ($Xml.Task.Actions.Exec.WorkingDirectory) {
+        # Sometimes the command is in the working directory
+        $workingDir = $Xml.Task.Actions.Exec.WorkingDirectory
+        if ($workingDir -and (Test-Path $workingDir)) {
+            $exeFiles = Get-ChildItem -Path $workingDir -Filter "*.exe" -ErrorAction SilentlyContinue
+            if ($exeFiles.Count -eq 1) {
+                $executablePath = $exeFiles[0].FullName
+                # No arguments in this case
+            }
+        }
+    }
+    
+    return @{
+        ExecutablePath = $executablePath
+        Arguments      = $arguments
+    }
+}
+
+# Function to extract triggers from XML task
+function Get-TriggersFromXml {
+    param([object]$Xml)
+    
+    $taskTriggers = @()
+    
+    if ($Xml.Task.Triggers) {
+        foreach ($trigger in $Xml.Task.Triggers.ChildNodes) {
+            if (-not $trigger -or -not $trigger.LocalName) { continue }
+            $taskTriggers += Convert-TriggerTypeToShortName -TriggerType $($trigger.LocalName)
+        }
+    }
+    
+    return $taskTriggers
+}
+
+# Function to convert trigger type to short name
+function Convert-TriggerTypeToShortName {
+    param([string]$TriggerType)
+    
+    switch ($TriggerType) {
+        "BootTrigger" { return "Boot" }
+        "LogonTrigger" { return "Logon" }
+        "TimeTrigger" { return "Time" }
+        "CalendarTrigger" { return "Calendar" }
+        "IdleTrigger" { return "Idle" }
+        "EventTrigger" { return "Event" }
+        "RegistrationTrigger" { return "Registration" }
+        "SessionStateChangeTrigger" { return "SessionStateChange" }
+        default { return $TriggerType }
+    }
+}
+
+# Function to disable a single scheduled task
+function Disable-SingleScheduledTask {
+    param(
+        [string]$TaskName,
+        [string]$TaskPath
+    )
+    
+    try {
+        Write-Host "  Processing: $TaskPath\$TaskName" -ForegroundColor Gray
+        
+        # First, try to stop the task if it's running
+        try {
+            $runningTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            if ($runningTask -and $runningTask.State -eq "Running") {
+                Write-Host "    Stopping running task..." -ForegroundColor Yellow
+                Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                Write-Host "    Stopped: $TaskName" -ForegroundColor Green
+            }
+            else {
+                Write-Host "    Task not running, skipping stop" -ForegroundColor Gray
+            }
+        }
+        catch {
+            Write-Host "    Warning: Could not stop task - $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        # Then disable the task
+        try {
+            Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Write-Host "    Disabled: $TaskName" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "    Failed to disable: $TaskName - $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  Error processing: $TaskPath\$TaskName - $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
 # Function to format path with quotes if needed
 function Format-PathWithQuotes {
     param([string]$Path)
@@ -889,43 +1068,7 @@ function Format-PathWithQuotes {
     }
 }
 
-# Function to create application entry from ScheduledTask object
-function New-ApplicationEntry {
-    param(
-        [ScheduledTask]$Task
-    )
-    
-    # Get primary executable
-    $primaryExecutable = $Task.GetPrimaryExecutable()
-    if (-not $primaryExecutable) {
-        return $null
-    }
-    
-    # Create application entry with default settings
-    $app = [ApplicationEntry]::new($null, $Script:DefaultAppSettings)
-    
-    # Set basic properties
-    $app.FileName = $primaryExecutable.GetFileName()
-    $app.Command = $primaryExecutable.ToString()
-    $app.WorkingDirectory = Format-PathWithQuotes -Path $Task.WorkingDirectory
-    
-    # Set triggers - join array with commas, but only if there are triggers
-    if ($Task.Triggers.Count -gt 0) {
-        $app.Triggers = $Task.Triggers -join ","
-        Write-Verbose "Setting triggers for $($app.FileName): $($app.Triggers)"
-    }
-    else {
-        $app.Triggers = ""
-        Write-Verbose "No triggers found for $($app.FileName)"
-    }
-    
-    # Apply application-specific overrides if they exist
-    if ($Script:AppOverrides.ContainsKey($primaryExecutable.Path)) {
-        $app.ApplyOverrides($Script:AppOverrides[$primaryExecutable.Path])
-    }
-    
-    return $app
-}
+
 
 # Function to scan task directories
 function Get-TaskXmlFiles {
@@ -945,8 +1088,8 @@ function Get-TaskXmlFiles {
     return $taskXmlFiles
 }
 
-# Function to process task XML file and return ScheduledTask object
-function Process-TaskXmlFile {
+# Function to process task XML file and return ApplicationEntry object directly
+function Process-TaskXmlFileToApplicationEntry {
     param(
         [System.IO.FileInfo]$XmlFile,
         [int]$ProcessedCount,
@@ -976,17 +1119,9 @@ function Process-TaskXmlFile {
             $taskPath = $taskPath -replace ".*\\ScheduledJobs", ""
         }
         
-        # Create task object
-        $task = [ScheduledTask]::new($taskPath, $XmlFile.Name)
-        
-        # Debug: Show task being processed
-        if ($ProcessedCount -le 10) {
-            Write-Verbose "Processing task: $($task.ToString())"
-        }
-        
         # Check if task should be ignored based on task path
-        if ($task.ShouldBeIgnored($IgnorePatterns)) {
-            Write-Host "Ignoring task due to pattern match: $($task.ToString())" -ForegroundColor Yellow
+        if (Test-TaskShouldBeIgnored -TaskPath $taskPath -IgnorePatterns $IgnorePatterns) {
+            Write-Host "Ignoring task due to pattern match: $taskPath\$($XmlFile.Name)" -ForegroundColor Yellow
             return $null
         }
         
@@ -1008,7 +1143,7 @@ function Process-TaskXmlFile {
         
         # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
         if ($executablePath -ilike "*RestartOnCrash.exe*") {
-            Write-Verbose "Skipping RestartOnCrash.exe: $($task.ToString()) -> $executablePath"
+            Write-Verbose "Skipping RestartOnCrash.exe: $taskPath\$($XmlFile.Name) -> $executablePath"
             return $null
         }
         
@@ -1029,32 +1164,47 @@ function Process-TaskXmlFile {
             Write-Verbose "Raw triggers from XML for $($XmlFile.Name): $($taskTriggers -join ', ')"
         }
         
-        # Set task properties
-        $task.Enabled = Test-TaskIsEnabled -Xml $xml
-        $task.WorkingDirectory = $workingDirectory
-        
-        # Add executable
-        $executable = [Executable]::new($executablePath, $arguments)
-        $task.AddExecutable($executable)
-        
-        # Add triggers
-        foreach ($trigger in $taskTriggers) {
-            $task.AddTrigger($trigger)
-        }
-        if ($ProcessedCount -le 10) {
-            Write-Verbose "  Triggers found: $($taskTriggers -join ', ')"
-            Write-Verbose "  Task triggers after adding: $($task.Triggers -join ', ')"
-        }
-        
         # Check if task has specified triggers (if any specified)
-        if (-not $task.HasAnyTrigger($SpecifiedTriggers)) {
-            Write-Verbose "Task filtered out - no matching triggers: $($task.ToString())"
-            return $null
+        if ($SpecifiedTriggers.Count -gt 0) {
+            $hasMatchingTrigger = $false
+            foreach ($trigger in $taskTriggers) {
+                if ($SpecifiedTriggers -contains $trigger) {
+                    $hasMatchingTrigger = $true
+                    break
+                }
+            }
+            if (-not $hasMatchingTrigger) {
+                Write-Verbose "Task filtered out - no matching triggers: $taskPath\$($XmlFile.Name)"
+                return $null
+            }
         }
         
-        Write-Verbose "Task: $($task.ToString())"
+        # Create ApplicationEntry object with default settings
+        $app = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         
-        return $task
+        # Set basic properties
+        $app.FileName = [System.IO.Path]::GetFileName($executablePath)
+        $app.Command = if ($arguments) { "`"$executablePath`" $arguments" } else { "`"$executablePath`"" }
+        $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory
+        
+        # Set triggers - join array with commas, but only if there are triggers
+        if ($taskTriggers.Count -gt 0) {
+            $app.Triggers = $taskTriggers -join ","
+            Write-Verbose "Setting triggers for $($app.FileName): $($app.Triggers)"
+        }
+        else {
+            $app.Triggers = ""
+            Write-Verbose "No triggers found for $($app.FileName)"
+        }
+        
+        # Apply application-specific overrides if they exist
+        if ($Script:AppOverrides.ContainsKey($executablePath)) {
+            $app.ApplyOverrides($Script:AppOverrides[$executablePath])
+        }
+        
+        Write-Verbose "Application: $($app.FileName) [$($app.Triggers)] -> $($app.Command)"
+        
+        return $app
     }
     catch {
         Write-Verbose "Error processing task $($XmlFile.Name): $($_.Exception.Message)"
@@ -1151,7 +1301,7 @@ function Read-ExistingIniFile {
             if ($Verbose) {
                 foreach ($section in $sectionFileNames.Keys) {
                     $fileName = $sectionFileNames[$section]
-                    Write-Verbose "$section -> $fileName" -ForegroundColor DarkGray
+                    Write-Verbose "$section -> $fileName"
                 }
             }
         }
@@ -1370,8 +1520,8 @@ function Get-StartupLogonScripts {
     return $logonScripts
 }
 
-# Function to convert startup entry to ScheduledTask object
-function Convert-StartupEntryToTask {
+# Function to convert startup entry to ApplicationEntry object
+function Convert-StartupEntryToApplicationEntry {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1421,19 +1571,16 @@ function Convert-StartupEntryToTask {
             return $null
         }
         
-        # Create task object
-        $task = [ScheduledTask]::new("\Startup\$($StartupEntry.Type)", $StartupEntry.Name)
-        $task.Enabled = $true
-        $task.WorkingDirectory = [System.IO.Path]::GetDirectoryName($executablePath)
+        # Create application entry using ApplicationEntry::new() with default settings
+        $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         
-        # Add executable
-        $executable = [Executable]::new($executablePath, $arguments)
-        $task.AddExecutable($executable)
+        # Set the specific properties for this startup entry
+        $entry.FileName = $executablePath
+        $entry.Command = if ($arguments) { "`"$executablePath`" $arguments" } else { "`"$executablePath`"" }
+        $entry.WorkingDirectory = [System.IO.Path]::GetDirectoryName($executablePath)
+        $entry.Triggers = "Logon"
         
-        # Add startup trigger
-        $task.AddTrigger("Logon")
-        
-        return $task
+        return $entry
     }
     catch {
         Write-Verbose "Error converting startup entry: $($_.Exception.Message)"
@@ -1446,119 +1593,34 @@ try {
     Set-Variable -Name "commandLine" -Value ($MyInvocation.Line | Sanitize-CommandLine) -Scope Global
     Write-Host "Script Command Line: $commandLine"
 
-    Write-Host "Extracting scheduled tasks from XML files..." -ForegroundColor Green
-
     Write-Host "Using output path: $OutputPath"
     
-    # Define task paths to scan
-    $taskPaths = @(
-        "$env:SystemRoot\System32\Tasks",
-        "$env:SystemRoot\Tasks"
-    )
-    
-    # Add user-specific task paths
-    $userProfiles = Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
-    foreach ($user in $userProfiles) {
-        $userTaskPath = "$($user.FullName)\AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs"
-        if (Test-Path $userTaskPath) {
-            $taskPaths += $userTaskPath
-        }
-    }
-    
-    # Scan for task XML files
-    Write-Host "Scanning task directories..." -ForegroundColor Green
-    $taskXmlFiles = Get-TaskXmlFiles -TaskPaths $taskPaths
-    Write-Host "Found $($taskXmlFiles.Count) total task files" -ForegroundColor Yellow
+
     
     # Show ignore patterns info if specified
     if ($Ignore.Count -gt 0) {
         Write-Host "Ignoring tasks matching patterns: $($Ignore -join ', ')" -ForegroundColor Cyan
     }
     
-    # Show disable tasks warning if specified
-    if ($DisableTasks) {
-        Write-Host "WARNING: Tasks will be stopped and disabled after successful conversion!" -ForegroundColor Red
-        Write-Host "This action cannot be undone automatically. Use with caution." -ForegroundColor Red
-    }
+
     
-    # Convert tasks to application format
-    $applications = @()
-    $processedExecutables = @{}
-    
-    # Load tasks based on parameters
-    $validTasks = @()
+    # Load all startup-related tasks and applications
+    $validApplications = @()
     
     if ($StartupTasks) {
-        # Use the new Load-StartupTasks function
-        $validTasks = Load-StartupTasks
+        $validApplications += Load-StartupTasks
     }
-    else {
-        # Original logic for processing all tasks
-        $processedCount = 0
-        
-        foreach ($xmlFile in $taskXmlFiles) {
-            $processedCount++
-            if ($processedCount % 50 -eq 0) {
-                Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
-            }
-            
-            $taskObject = Process-TaskXmlFile -XmlFile $xmlFile -ProcessedCount $processedCount -SpecifiedTriggers @() -EnabledOnly $false -IgnorePatterns $Ignore
-            
-            if ($taskObject) {
-                $validTasks += $taskObject
-            }
-        }
-        
-        Write-Host "Processing summary:" -ForegroundColor Yellow
-        Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
-        Write-Host "  Valid tasks found: $($validTasks.Count)" -ForegroundColor White
+    if ($StartupFiles) {
+        $validApplications += Load-StartupFiles
     }
-    
-    # Scan for startup entries if requested
-    if ($StartupFiles -or $StartupRegistry -or $StartupLogonScripts) {
-        Write-Host "`nScanning startup entries..." -ForegroundColor Green
-        
-        if ($StartupFiles) {
-            Write-Host "Scanning startup files..." -ForegroundColor Cyan
-            $startupFiles = Get-StartupFiles
-            Write-Host "Found $($startupFiles.Count) startup files" -ForegroundColor Yellow
-            
-            foreach ($startupFile in $startupFiles) {
-                $startupTask = Convert-StartupEntryToTask -StartupEntry $startupFile
-                if ($startupTask) {
-                    $validTasks += $startupTask
-                }
-            }
-        }
-        
-        if ($StartupRegistry) {
-            Write-Host "Scanning startup registry entries..." -ForegroundColor Cyan
-            $startupRegistry = Get-StartupRegistry
-            Write-Host "Found $($startupRegistry.Count) startup registry entries" -ForegroundColor Yellow
-            
-            foreach ($registryEntry in $startupRegistry) {
-                $startupTask = Convert-StartupEntryToTask -StartupEntry $registryEntry
-                if ($startupTask) {
-                    $validTasks += $startupTask
-                }
-            }
-        }
-        
-        if ($StartupLogonScripts) {
-            Write-Host "Scanning logon scripts..." -ForegroundColor Cyan
-            $logonScripts = Get-StartupLogonScripts
-            Write-Host "Found $($logonScripts.Count) logon scripts" -ForegroundColor Yellow
-            
-            foreach ($logonScript in $logonScripts) {
-                $startupTask = Convert-StartupEntryToTask -StartupEntry $logonScript
-                if ($startupTask) {
-                    $validTasks += $startupTask
-                }
-            }
-        }
-        
-        Write-Host "Total valid tasks after startup scanning: $($validTasks.Count)" -ForegroundColor Yellow
+    if ($StartupRegistry) {
+        $validApplications += Load-StartupRegistry
     }
+    if ($StartupLogonScripts) {
+        $validApplications += Load-StartupLogonScripts
+    }
+
+    # If no startup parameters are specified, no applications will be loaded
     
     # Handle merge mode if specified
     $existingData = $null
@@ -1574,19 +1636,16 @@ try {
             Write-Verbose "Existing FileNames to check against: $($existingFileNames -join ', ')"
         }
     }
-    
-    # Create application entries from collected task objects
-    foreach ($task in $validTasks) {
-        # Get primary executable path for deduplication
-        $executablePath = $task.GetPrimaryExecutablePath()
+    $addedCount = 0
+    # Process collected application entries
+    foreach ($app in $validApplications) {
+        # Get executable path for deduplication
+        $executablePath = $app.FileName
         
         # Skip if already processed (duplicate executable)
         if ($processedExecutables.ContainsKey($executablePath)) {
             continue
         }
-        
-        # Create application entry
-        $app = New-ApplicationEntry -Task $task
         
         # Check if this application already exists in merge mode
         if ($Merge) {
@@ -1594,19 +1653,22 @@ try {
             Write-Verbose "  Existing FileNames: $($existingFileNames -join ', ')"
             
             if ($existingFileNames -contains $app.FileName) {
-                Write-Verbose "  MATCH FOUND - Skipping: $($task.TaskName) -> $($task.ExecutablePath)"
+                Write-Verbose "  MATCH FOUND - Skipping: $($app.FileName)"
                 continue
             }
             else {
-                Write-Verbose "  NO MATCH - Will add: $($task.TaskName) -> $($task.ExecutablePath)"
+                Write-Verbose "  NO MATCH - Will add: $($app.FileName)"
             }
         }
         
         $applications += $app
         $processedExecutables[$executablePath] = $true
         
-        Write-Host "Added: $($task.ToString())" -ForegroundColor Cyan
+        Write-Verbose "Added: $($app.FileName)"
+        $addedCount++
     }
+
+    Write-Host "Added applications: $addedCount" -ForegroundColor Cyan
     
     # Use the full command line (including parameters) used to invoke this script for documentation
     $Script:GeneralSettings.GeneratorCommand = $global:commandLine
@@ -1651,17 +1713,7 @@ try {
         Write-Host "Total applications added: $($applications.Count)" -ForegroundColor Yellow
     }
     
-    # Stop and disable tasks if requested
-    if ($DisableTasks) {
-        # Check if we have administrator privileges
-        if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-            Write-Warning "Cannot stop/disable tasks without administrator privileges. Skipping task processing."
-        }
-        else {
-            $taskResult = Stop-AndDisable-ScheduledTasks -TaskObjects $validTasks
-            Write-Host "Task processing completed. Stopped: $($taskResult.StoppedCount), Disabled: $($taskResult.DisabledCount), Failed: $($taskResult.FailedCount)" -ForegroundColor Yellow
-        }
-    }
+
     
     # Show summary
     Show-ApplicationSummary -Applications $applications
