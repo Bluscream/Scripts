@@ -36,4 +36,7 @@ if (Test-Path($ChocolateyProfile)) {
 
 new-alias ytm youtube-music-control
 
+# Auto-import pwshgrep module
+Import-Module pwshgrep -ErrorAction SilentlyContinue
+
 Write-Host "Ran '$PSCommandPath'"

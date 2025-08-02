@@ -49,3 +49,6 @@ unraid\config\plugins\user.scripts\scripts\sort-apks\tools
 !/unraid/config/plugins/user.scripts/
 !/unraid/config/plugins/user.scripts/scripts/
 !/unraid/config/plugins/user.scripts/scripts/*
+Remove-EdgeWeb.exe
+restart-on-crash.ini
+RestartOnCrash/settings.ini

@@ -12,73 +12,75 @@ if (-not (Get-Variable -Name possibleSteps -Scope Script -ErrorAction SilentlyCo
 # region Predefined Steps
 if (-not $possibleSteps.ContainsKey("special")) {
     $possibleSteps["special"] = @{
-        toast = @{
+        toast           = @{
             Description = "Show a toast notification"
-            Code = { Show-Toast -Message $Message -Title "Clean.ps1" }
+            Code        = { Show-Toast -Message $Message -Title "Clean.ps1" }
         }
-        shutdown = @{
+        shutdown        = @{
             Description = "Shutdown the computer"
-            Code = {
+            Code        = {
                 try {
                     Stop-Computer -Force
-                } catch {
+                }
+                catch {
                     Write-Host "[SPECIAL] Failed to shutdown: $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
         }
-        logout = @{
+        logout          = @{
             Description = "Log out the current user"
-            Code = { Logout-CurrentUser }
+            Code        = { Logout-CurrentUser }
         }
-        sleep = @{
+        sleep           = @{
             Description = "Put the computer to sleep"
-            Code = { Sleep-Computer }
+            Code        = { Sleep-Computer }
         }
-        lock = @{
+        lock            = @{
             Description = "Lock the workstation"
-            Code = { Lock-Computer }
+            Code        = { Lock-Computer }
         }
-        reboot = @{
+        reboot          = @{
             Description = "Reboot the computer"
-            Code = {
+            Code        = {
                 try {
                     Restart-Computer -Force
-                } catch {
+                }
+                catch {
                     Write-Host "[SPECIAL] Failed to reboot: $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
         }
-        hibernate = @{
+        hibernate       = @{
             Description = "Hibernate the computer"
-            Code = { Hibernate-Computer }
+            Code        = { Hibernate-Computer }
         }
-        pause = @{
+        pause           = @{
             Description = "Pause script execution until user input"
-            Code = { Pause "Paused by user request. Press any key to continue..." }
+            Code        = { Pause "Paused by user request. Press any key to continue..." }
         }
-        elevate = @{
+        elevate         = @{
             Description = "Rerun the script as administrator (UAC prompt)"
-            Code = { Elevate-Self }
+            Code        = { Elevate-Self }
         }
-        exit = @{
+        exit            = @{
             Description = "Exit Script"
-            Code = { exit }
+            Code        = { exit }
         }
-        powersaver = @{
+        powersaver      = @{
             Description = "Set Windows power plan to Power Saver"
-            Code      = { Set-PowerProfile -Profile powersaver }
+            Code        = { Set-PowerProfile -Profile powersaver }
         }
-        balanced = @{
+        balanced        = @{
             Description = "Set Windows power plan to Balanced"
-            Code      = { Set-PowerProfile -Profile balanced }
+            Code        = { Set-PowerProfile -Profile balanced }
         }
         highperformance = @{
             Description = "Set Windows power plan to High Performance"
-            Code      = { Set-PowerProfile -Profile highperformance }
+            Code        = { Set-PowerProfile -Profile highperformance }
         }
-        waitaminute = @{
+        waitaminute     = @{
             Description = "Wait for 60 seconds"
-            Code = { Start-Sleep -Seconds 60 }
+            Code        = { Start-Sleep -Seconds 60 }
         }
     }
 }
@@ -95,8 +97,21 @@ function Expand-Steps {
     foreach ($action in $Actions) {
         switch ($action) {
             "all" {
-                if ($Steps.ContainsKey("clean")) {
+                # First check if there's a meta.all action defined
+                if ($Steps.ContainsKey("meta") -and $Steps["meta"].ContainsKey("all")) {
+                    $actionsToRun += $Steps["meta"]["all"].Actions
+                }
+                # Fallback: look for "clean" category (for backwards compatibility)
+                elseif ($Steps.ContainsKey("clean")) {
                     $actionsToRun += $Steps["clean"].Keys
+                }
+                # Fallback: look for any main category (update, clean, etc.)
+                else {
+                    foreach ($category in $Steps.Keys) {
+                        if ($category -ne "meta" -and $category -ne "special") {
+                            $actionsToRun += $Steps[$category].Keys
+                        }
+                    }
                 }
             }
             "default" {
@@ -127,8 +142,8 @@ function Run-Steps {
             if ($Steps[$category].ContainsKey($act)) {
                 $desc = $Steps[$category][$act].Description
                 $actionTable += [PSCustomObject]@{
-                    Step = $stepNum
-                    Code = $act
+                    Step        = $stepNum
+                    Code        = $act
                     Description = $desc
                 }
                 $stepNum++
@@ -155,5 +170,5 @@ function Run-Steps {
 
 # Only export module members if running as a module (not dot-sourced as a script)
 if ($MyInvocation.ScriptName -and ($MyInvocation.ScriptName -like '*.psm1')) {
-    Export-ModuleMember -Function Expand-Steps,Run-Steps -Variable possibleSteps
+    Export-ModuleMember -Function Expand-Steps, Run-Steps -Variable possibleSteps
 } 
