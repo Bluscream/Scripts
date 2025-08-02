@@ -1,3 +1,4 @@
+[CmdletBinding()]
 #Requires -Version 5.1
 
 <#
@@ -77,8 +78,13 @@ param(
     [switch]$DisableTasks,
     [switch]$Merge,
     [switch]$WriteExtra,
-    [string[]]$Ignore = @()
+    [string[]]$Ignore = @(),
+    [switch]$StartupFiles,
+    [switch]$StartupRegistry,
+    [switch]$StartupLogonScripts
 )
+
+$Verbose = $true
 
 # =============================================================================
 # CONFIGURATION SECTION - Modify these settings as needed
@@ -266,7 +272,7 @@ class ScheduledTask {
     }
     
     [string]ToString() {
-        return "$($this.Path)\$($this.Name) -> $($this.GetCommandString())"
+        return "$($this.Path)\$($this.Name) [$($this.Triggers -join ',')] -> $($this.GetCommandString())"
     }
 }
 
@@ -442,7 +448,214 @@ function Get-WorkingDirectory {
     return ""
 }
 
+function Load-StartupLogonScripts {
+    <#
+    .SYNOPSIS
+        Returns a list of ApplicationEntry objects for all scripts set to run at user logon via Group Policy (Logon Scripts).
+    .DESCRIPTION
+        Scans the standard locations for logon scripts defined in Group Policy for all users and returns a list of ApplicationEntry objects for each found script.
+    .OUTPUTS
+        [ApplicationEntry[]]
+    #>
 
+    $entries = @()
+
+    # Common locations for logon scripts
+    $scriptDirs = @(
+        "$env:WINDIR\System32\GroupPolicy\User\Scripts\Logon",
+        "$env:WINDIR\System32\GroupPolicy\Machine\Scripts\Startup"
+    )
+
+    foreach ($dir in $scriptDirs) {
+        if (Test-Path $dir) {
+            $iniPath = Join-Path $dir "scripts.ini"
+            if (Test-Path $iniPath) {
+                # Parse scripts.ini for script file names
+                $lines = Get-Content $iniPath
+                foreach ($line in $lines) {
+                    if ($line -match '^\s*Script\s*=\s*(.+)$') {
+                        $scriptFile = $matches[1].Trim()
+                        $scriptPath = Join-Path $dir $scriptFile
+                        if (Test-Path $scriptPath) {
+                            $settings = @{
+                                FileName             = $scriptPath
+                                WindowTitle          = ""
+                                Enabled              = 1
+                                Command              = "`"$scriptPath`""
+                                WorkingDirectory     = [System.IO.Path]::GetDirectoryName($scriptPath)
+                                CommandEnabled       = 1
+                                CrashNotResponding   = 1
+                                CrashNotRunning      = 0
+                                KillIfHanged         = 1
+                                CloseProblemReporter = 1
+                                DelayEnabled         = 1
+                                CrashDelay           = 60
+                                Triggers             = "Logon"
+                            }
+                            $entry = [ApplicationEntry]::new($settings, $Script:DefaultAppSettings)
+                            $entries += $entry
+                        }
+                    }
+                }
+            }
+            # Also enumerate all .bat, .cmd, .ps1, .vbs files in the directory
+            $scriptFiles = Get-ChildItem -Path $dir -File -Include *.bat, *.cmd, *.ps1, *.vbs -ErrorAction SilentlyContinue
+            foreach ($file in $scriptFiles) {
+                $settings = @{
+                    FileName             = $file.FullName
+                    WindowTitle          = ""
+                    Enabled              = 1
+                    Command              = "`"$($file.FullName)`""
+                    WorkingDirectory     = $file.DirectoryName
+                    CommandEnabled       = 1
+                    CrashNotResponding   = 1
+                    CrashNotRunning      = 0
+                    KillIfHanged         = 1
+                    CloseProblemReporter = 1
+                    DelayEnabled         = 1
+                    CrashDelay           = 60
+                    Triggers             = if ($dir -like "*Startup") { "Boot" } else { "Logon" }
+                }
+                $entry = [ApplicationEntry]::new($settings, $Script:DefaultAppSettings)
+                $entries += $entry
+            }
+        }
+    }
+
+    return $entries
+}
+function Load-StartupRegistry {
+    <#
+    .SYNOPSIS
+        Returns a list of ApplicationEntry objects for all programs set to run at Windows startup via registry.
+    .DESCRIPTION
+        Scans the standard Run and RunOnce registry keys for both the current user and all users,
+        and returns a list of ApplicationEntry objects for each found entry.
+    .OUTPUTS
+        [ApplicationEntry[]]
+    #>
+
+    $runKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+    )
+
+    $entries = @()
+
+    foreach ($key in $runKeys) {
+        if (Test-Path $key) {
+            $values = Get-ItemProperty -Path $key | Select-Object -Property * -ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider
+            foreach ($property in $values.PSObject.Properties) {
+                $name = $property.Name
+                $commandLine = $property.Value
+
+                # Try to extract the executable path and arguments
+                $exePath = ""
+                $arguments = ""
+                if ($commandLine -match '^\s*"(.*?)"\s*(.*)') {
+                    $exePath = $matches[1]
+                    $arguments = $matches[2]
+                }
+                elseif ($commandLine -match '^\s*([^\s]+)\s*(.*)') {
+                    $exePath = $matches[1]
+                    $arguments = $matches[2]
+                }
+
+                # If the exePath is not a file, skip
+                if (-not $exePath -or -not (Test-Path $exePath)) {
+                    continue
+                }
+
+                $workingDir = [System.IO.Path]::GetDirectoryName($exePath)
+
+                $settings = @{
+                    FileName             = $exePath
+                    WindowTitle          = ""
+                    Enabled              = 1
+                    Command              = if ($arguments) { "`"$exePath`" $arguments" } else { "`"$exePath`"" }
+                    WorkingDirectory     = $workingDir
+                    CommandEnabled       = 1
+                    CrashNotResponding   = 1
+                    CrashNotRunning      = 0
+                    KillIfHanged         = 1
+                    CloseProblemReporter = 1
+                    DelayEnabled         = 1
+                    CrashDelay           = 60
+                    Triggers             = "Logon"
+                }
+
+                $entry = [ApplicationEntry]::new($settings, $null)
+                $entries += $entry
+            }
+        }
+    }
+
+    return $entries
+}
+
+function Load-StartupFiles {
+    <#
+    .SYNOPSIS
+        Returns a list of ApplicationEntry objects for all files in the user's and system's Startup folders.
+    .DESCRIPTION
+        Scans both the current user's and the common (all users) Startup folders for .lnk, .exe, .bat, and .cmd files,
+        and returns a list of ApplicationEntry objects for each found file.
+    .OUTPUTS
+        [ApplicationEntry[]]
+    #>
+    $startupFolders = @(
+        [Environment]::GetFolderPath("Startup"),
+        [Environment]::GetFolderPath("CommonStartup")
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    $startupFiles = @()
+    foreach ($folder in $startupFolders) {
+        $startupFiles += Get-ChildItem -Path $folder -File -Include *.* -ErrorAction SilentlyContinue
+    }
+
+    $entries = @()
+    foreach ($file in $startupFiles) {
+        $targetPath = $null
+        $arguments = ""
+        $workingDir = ""
+
+        if ($file.Extension -ieq ".lnk") {
+            # Use WScript.Shell to resolve shortcut target
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($file.FullName)
+            $targetPath = $shortcut.TargetPath
+            $arguments = $shortcut.Arguments
+            $workingDir = $shortcut.WorkingDirectory
+        }
+        else {
+            $targetPath = $file.FullName
+            $workingDir = [System.IO.Path]::GetDirectoryName($targetPath)
+        }
+
+        if (-not $targetPath -or -not (Test-Path $targetPath)) {
+            continue
+        }
+
+        $settings = @{
+            FileName             = $targetPath
+            WindowTitle          = ""
+            Enabled              = 1
+            Command              = if ($arguments) { "`"$targetPath`" $arguments" } else { "`"$targetPath`"" }
+            WorkingDirectory     = $workingDir
+            CommandEnabled       = 1
+            CrashNotResponding   = 1
+            CrashNotRunning      = 0
+            KillIfHanged         = 1
+            CloseProblemReporter = 1
+            DelayEnabled         = 1
+            CrashDelay           = 60
+            Triggers             = "Logon"
+        }
+        $entry = [ApplicationEntry]::new($settings, $Script:DefaultAppSettings)
+        $entries += $entry
+    }
+    return $entries
+}
 
 # Function to extract executable path and arguments from XML task
 function Get-ExecutablePathAndArgsFromXml {
@@ -627,7 +840,16 @@ function New-ApplicationEntry {
     $app.FileName = $primaryExecutable.GetFileName()
     $app.Command = $primaryExecutable.ToString()
     $app.WorkingDirectory = Format-PathWithQuotes -Path $Task.WorkingDirectory
-    $app.Triggers = $Task.Triggers -join ","
+    
+    # Set triggers - join array with commas, but only if there are triggers
+    if ($Task.Triggers.Count -gt 0) {
+        $app.Triggers = $Task.Triggers -join ","
+        Write-Verbose "Setting triggers for $($app.FileName): $($app.Triggers)"
+    }
+    else {
+        $app.Triggers = ""
+        Write-Verbose "No triggers found for $($app.FileName)"
+    }
     
     # Apply application-specific overrides if they exist
     if ($Script:AppOverrides.ContainsKey($primaryExecutable.Path)) {
@@ -689,6 +911,11 @@ function Process-TaskXmlFile {
         # Create task object
         $task = [ScheduledTask]::new($taskPath, $XmlFile.Name)
         
+        # Debug: Show task being processed
+        if ($ProcessedCount -le 10) {
+            Write-Verbose "Processing task: $($task.ToString())"
+        }
+        
         # Check if task should be ignored based on task path
         if ($task.ShouldBeIgnored($IgnorePatterns)) {
             Write-Host "Ignoring task due to pattern match: $($task.ToString())" -ForegroundColor Yellow
@@ -706,7 +933,10 @@ function Process-TaskXmlFile {
         $arguments = $execInfo.Arguments
         
         # Skip if no executable found
-        if (-not $executablePath) { return $null }
+        if (-not $executablePath) { 
+            Write-Verbose "No executable found for task: $($XmlFile.Name)"
+            return $null 
+        }
         
         # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
         if ($executablePath -ilike "*RestartOnCrash.exe*") {
@@ -715,13 +945,21 @@ function Process-TaskXmlFile {
         }
         
         # Verify executable exists
-        if (-not [System.IO.File]::Exists($executablePath)) { return $null }
+        if (-not [System.IO.File]::Exists($executablePath)) { 
+            Write-Verbose "Executable not found on disk: $executablePath"
+            return $null 
+        }
         
         # Extract working directory
-        $workingDirectory = Get-WorkingDirectoryFromXml -Xml $xml
+        $workingDirectory = Get-WorkingDirectory -ExecutablePath $executablePath
         
         # Extract triggers
         $taskTriggers = Get-TriggersFromXml -Xml $xml
+        
+        # Debug: Show raw trigger extraction for first few tasks
+        if ($ProcessedCount -le 10) {
+            Write-Verbose "Raw triggers from XML for $($XmlFile.Name): $($taskTriggers -join ', ')"
+        }
         
         # Set task properties
         $task.Enabled = Test-TaskIsEnabled -Xml $xml
@@ -735,20 +973,18 @@ function Process-TaskXmlFile {
         foreach ($trigger in $taskTriggers) {
             $task.AddTrigger($trigger)
         }
+        if ($ProcessedCount -le 10) {
+            Write-Verbose "  Triggers found: $($taskTriggers -join ', ')"
+            Write-Verbose "  Task triggers after adding: $($task.Triggers -join ', ')"
+        }
         
         # Check if task has specified triggers (if any specified)
         if (-not $task.HasAnyTrigger($SpecifiedTriggers)) {
+            Write-Verbose "Task filtered out - no matching triggers: $($task.ToString())"
             return $null
         }
         
-        # Debug: Show first few tasks
-        if ($ProcessedCount -le 10) {
-            Write-Host "Task: $($task.ToString())" -ForegroundColor DarkGray
-            Write-Host "  Executable: $($task.GetPrimaryExecutablePath())" -ForegroundColor DarkGray
-            if ($arguments) {
-                Write-Host "  Arguments: $arguments" -ForegroundColor DarkGray
-            }
-        }
+        Write-Verbose "Task: $($task.ToString())"
         
         return $task
     }
@@ -1047,10 +1283,7 @@ try {
         $applications += $app
         $processedExecutables[$executablePath] = $true
         
-        Write-Host "Added: $($task.ToString()) -> $($task.GetPrimaryExecutablePath())" -ForegroundColor Cyan
-        if ($app.Triggers) {
-            Write-Host "  Triggers: $($app.Triggers)" -ForegroundColor DarkCyan
-        }
+        Write-Host "Added: $($task.ToString())" -ForegroundColor Cyan
     }
     
     # Use the full command line (including parameters) used to invoke this script for documentation
