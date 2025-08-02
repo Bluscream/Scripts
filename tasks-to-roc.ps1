@@ -18,8 +18,7 @@
      
  .PARAMETER Triggers
      Filter tasks to only include those with specified trigger types.
-     Valid values: BootTrigger, LogonTrigger, TimeTrigger, CalendarTrigger, 
-     IdleTrigger, EventTrigger, RegistrationTrigger, SessionStateChangeTrigger
+     Valid values: Boot, Logon, Time, Calendar, Idle, Event, Registration, SessionStateChange
      
  .PARAMETER EnabledOnly
      Only process tasks that are enabled (skip disabled tasks).
@@ -34,8 +33,8 @@
      Include extra fields in the INI output (Triggers and GeneratorCommand). By default, these are excluded for cleaner output.
      
  .PARAMETER Ignore
-     Array of wildcard patterns to ignore tasks based on their task path (e.g., \Startup\Microsoft\Task). Useful for excluding system tasks.
-     Example: -Ignore "*\Microsoft\*","*\OneDrive\*","*\Windows\*"
+     Array of patterns to ignore tasks based on their task path. Patterns are automatically wrapped with wildcards (*pattern*) and matched case-insensitively.
+     Example: -Ignore "Microsoft","OneDrive","Windows"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -OutputPath "C:\temp\restart-on-crash.ini"
@@ -46,19 +45,19 @@
      .\tasks-to-roc.ps1 -NoElevate -OutputPath "C:\temp\restart-on-crash.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "BootTrigger","LogonTrigger" -OutputPath "C:\temp\boot-logon-tasks.ini"
+     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -OutputPath "C:\temp\boot-logon-tasks.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -EnabledOnly -OutputPath "C:\temp\enabled-tasks.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "BootTrigger","LogonTrigger" -EnabledOnly -OutputPath "C:\temp\enabled-boot-logon.ini"
+     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -EnabledOnly -OutputPath "C:\temp\enabled-boot-logon.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -DisableTasks -OutputPath "C:\temp\restart-on-crash.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "BootTrigger","LogonTrigger" -DisableTasks -OutputPath "C:\temp\boot-logon-disabled.ini"
+     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -DisableTasks -OutputPath "C:\temp\boot-logon-disabled.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -Merge -OutputPath "C:\temp\existing-config.ini"
@@ -67,7 +66,7 @@
      .\tasks-to-roc.ps1 -WriteExtra -OutputPath "C:\temp\restart-on-crash-with-extras.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -Ignore "*\Microsoft\*","*\OneDrive\*" -OutputPath "C:\temp\filtered-tasks.ini"
+     .\tasks-to-roc.ps1 -Ignore "Microsoft","OneDrive" -OutputPath "C:\temp\filtered-tasks.ini"
 #>
 
 param(
@@ -80,32 +79,6 @@ param(
     [switch]$WriteExtra,
     [string[]]$Ignore = @()
 )
-
-# Self-elevation logic
-if (-not $NoElevate -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    $elevationReason = if ($DisableTasks) { "disable scheduled tasks" } else { "access all scheduled tasks" }
-    Write-Host "This script requires administrator privileges to $elevationReason." -ForegroundColor Yellow
-    Write-Host "Attempting to elevate privileges..." -ForegroundColor Yellow
-    
-    try {
-        $arguments = $PSBoundParameters.GetEnumerator() | ForEach-Object {
-            if ($_.Key -eq "NoElevate") { return }
-            if ($_.Value -is [switch]) {
-                if ($_.Value.IsPresent) { "-$($_.Key)" }
-            }
-            else {
-                "-$($_.Key)", "`"$($_.Value)`""
-            }
-        }
-        
-        Start-Process PowerShell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"", $arguments -Verb RunAs -Wait
-        exit
-    }
-    catch {
-        Write-Warning "Could not elevate privileges automatically. Please run as Administrator manually."
-        Write-Host "Continuing with limited access..." -ForegroundColor Yellow
-    }
-}
 
 # =============================================================================
 # CONFIGURATION SECTION - Modify these settings as needed
@@ -147,10 +120,238 @@ $Script:AppOverrides = @{
     # }
 }
 
+# Self-elevation logic
+if (-not $NoElevate -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    $elevationReason = if ($DisableTasks) { "disable scheduled tasks" } else { "access all scheduled tasks" }
+    Write-Host "This script requires administrator privileges to $elevationReason." -ForegroundColor Yellow
+    Write-Host "Attempting to elevate privileges..." -ForegroundColor Yellow
+    
+    try {
+        $arguments = $PSBoundParameters.GetEnumerator() | ForEach-Object {
+            if ($_.Key -eq "NoElevate") { return }
+            if ($_.Value -is [switch]) {
+                if ($_.Value.IsPresent) { "-$($_.Key)" }
+            }
+            else {
+                "-$($_.Key)", "`"$($_.Value)`""
+            }
+        }
+        
+        Start-Process PowerShell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"", $arguments -Verb RunAs -Wait
+        exit
+    }
+    catch {
+        Write-Warning "Could not elevate privileges automatically. Please run as Administrator manually."
+        Write-Host "Continuing with limited access..." -ForegroundColor Yellow
+    }
+}
+
+# =============================================================================
+# TASK CLASSES
 # =============================================================================
 
-Set-Variable -Name "commandLine" -Value "$($MyInvocation.Line -replace ';', ' ' -replace '"', "'")" -Scope Global
-Write-Host "Script Command Line: $commandLine"
+# Executable class to hold executable information
+class Executable {
+    [string]$Path
+    [string]$Arguments
+    
+    Executable([string]$path, [string]$arguments = "") {
+        $this.Path = $path
+        $this.Arguments = $arguments
+    }
+    
+    [string]ToString() {
+        if ($this.Arguments) {
+            return "`"$($this.Path)`" $($this.Arguments)"
+        }
+        return "`"$($this.Path)`""
+    }
+    
+    [string]GetFileName() {
+        return [System.IO.Path]::GetFileName($this.Path)
+    }
+    
+    [bool]Exists() {
+        return [System.IO.File]::Exists($this.Path)
+    }
+}
+
+# Task class to hold scheduled task information
+class ScheduledTask {
+    [string]$Path
+    [string]$Name
+    [Executable[]]$Executables
+    [string[]]$Triggers
+    [bool]$Enabled
+    [string]$WorkingDirectory
+    
+    ScheduledTask([string]$path, [string]$name) {
+        $this.Path = $path
+        $this.Name = $name
+        $this.Executables = @()
+        $this.Triggers = @()
+        $this.Enabled = $true
+        $this.WorkingDirectory = ""
+    }
+    
+    [void]AddExecutable([Executable]$executable) {
+        $this.Executables += $executable
+    }
+    
+    [void]AddTrigger([string]$trigger) {
+        if ($trigger -and -not ($this.Triggers -contains $trigger)) {
+            $this.Triggers += $trigger
+        }
+    }
+    
+    [Executable]GetPrimaryExecutable() {
+        if ($this.Executables.Count -gt 0) {
+            return $this.Executables[0]
+        }
+        return $null
+    }
+    
+    [string]GetPrimaryExecutablePath() {
+        $primary = $this.GetPrimaryExecutable()
+        if ($primary) {
+            return $primary.Path
+        }
+        return ""
+    }
+    
+    [string]GetPrimaryExecutableFileName() {
+        $primary = $this.GetPrimaryExecutable()
+        if ($primary) {
+            return $primary.GetFileName()
+        }
+        return ""
+    }
+    
+    [string]GetCommandString() {
+        $primary = $this.GetPrimaryExecutable()
+        if ($primary) {
+            return $primary.ToString()
+        }
+        return ""
+    }
+    
+    [bool]HasValidExecutable() {
+        $primary = $this.GetPrimaryExecutable()
+        if ($primary) {
+            return $primary.Exists()
+        }
+        return $false
+    }
+    
+    [bool]ShouldBeIgnored([string[]]$ignorePatterns) {
+        if ($ignorePatterns.Count -eq 0) { return $false }
+        
+        foreach ($pattern in $ignorePatterns) {
+            if ($this.Path -ilike "*$pattern*") {
+                return $true
+            }
+        }
+        return $false
+    }
+    
+    [bool]HasAnyTrigger([string[]]$triggers) {
+        if ($triggers.Count -eq 0) { return $true }
+        
+        foreach ($trigger in $this.Triggers) {
+            if ($triggers -contains $trigger) {
+                return $true
+            }
+        }
+        return $false
+    }
+    
+    [string]ToString() {
+        return "$($this.Path)\$($this.Name) -> $($this.GetCommandString())"
+    }
+}
+
+# ApplicationEntry class to hold RestartOnCrash application configuration
+class ApplicationEntry {
+    [string]$FileName
+    [string]$WindowTitle
+    [int]$Enabled
+    [string]$Command
+    [string]$WorkingDirectory
+    [int]$CommandEnabled
+    [int]$CrashNotResponding
+    [int]$CrashNotRunning
+    [int]$KillIfHanged
+    [int]$CloseProblemReporter
+    [int]$DelayEnabled
+    [int]$CrashDelay
+    [string]$Triggers
+    
+    ApplicationEntry() {
+        $this.FileName = ""
+        $this.WindowTitle = ""
+        $this.Enabled = 1
+        $this.Command = ""
+        $this.WorkingDirectory = ""
+        $this.CommandEnabled = 1
+        $this.CrashNotResponding = 1
+        $this.CrashNotRunning = 0
+        $this.KillIfHanged = 1
+        $this.CloseProblemReporter = 1
+        $this.DelayEnabled = 1
+        $this.CrashDelay = 60
+        $this.Triggers = ""
+    }
+    
+    ApplicationEntry([hashtable]$settings, [hashtable]$defaults) {
+        if (-not $defaults) { $defaults = $Script:DefaultAppSettings }
+
+        $this.FileName = $settings.FileName ?? $defaults.FileName
+        $this.WindowTitle = $settings.WindowTitle ?? $defaults.WindowTitle
+        $this.Enabled = $settings.Enabled ?? $defaults.Enabled
+        $this.Command = $settings.Command ?? $defaults.Command
+        $this.WorkingDirectory = $settings.WorkingDirectory ?? $defaults.WorkingDirectory
+        $this.CommandEnabled = $settings.CommandEnabled ?? $defaults.CommandEnabled
+        $this.CrashNotResponding = $settings.CrashNotResponding ?? $defaults.CrashNotResponding
+        $this.CrashNotRunning = $settings.CrashNotRunning ?? $defaults.CrashNotRunning
+        $this.KillIfHanged = $settings.KillIfHanged ?? $defaults.KillIfHanged
+        $this.CloseProblemReporter = $settings.CloseProblemReporter ?? $defaults.CloseProblemReporter
+        $this.DelayEnabled = $settings.DelayEnabled ?? $defaults.DelayEnabled
+        $this.CrashDelay = $settings.CrashDelay ?? $defaults.CrashDelay
+        $this.Triggers = $settings.Triggers ?? $defaults.Triggers
+    }
+    
+    [hashtable]ToHashtable() {
+        return @{
+            FileName             = $this.FileName
+            WindowTitle          = $this.WindowTitle
+            Enabled              = $this.Enabled
+            Command              = $this.Command
+            WorkingDirectory     = $this.WorkingDirectory
+            CommandEnabled       = $this.CommandEnabled
+            CrashNotResponding   = $this.CrashNotResponding
+            CrashNotRunning      = $this.CrashNotRunning
+            KillIfHanged         = $this.KillIfHanged
+            CloseProblemReporter = $this.CloseProblemReporter
+            DelayEnabled         = $this.DelayEnabled
+            CrashDelay           = $this.CrashDelay
+            Triggers             = $this.Triggers
+        }
+    }
+    
+    [void]ApplyOverrides([hashtable]$overrides) {
+        foreach ($key in $overrides.Keys) {
+            if ($this.PSObject.Properties.Name -contains $key) {
+                $this.$key = $overrides[$key]
+            }
+        }
+    }
+    
+    [string]ToString() {
+        return "ApplicationEntry: $($this.FileName)"
+    }
+}
+
+# =============================================================================
 
 # Function to show application summary
 function Show-ApplicationSummary {
@@ -179,10 +380,10 @@ function Stop-AndDisable-ScheduledTasks {
     
     foreach ($task in $TaskObjects) {
         try {
-            # Get the task name from the file path
-            $taskName = $task.TaskName
+            # Get the task name from the ScheduledTask object
+            $taskName = $task.Name
             
-            Write-Host "  Processing: $taskName" -ForegroundColor Gray
+            Write-Host "  Processing: $($task.ToString())" -ForegroundColor Gray
             
             # First, try to stop the task if it's running
             try {
@@ -214,7 +415,7 @@ function Stop-AndDisable-ScheduledTasks {
             
         }
         catch {
-            Write-Host "  Error processing: $($task.TaskName) - $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  Error processing: $($task.ToString()) - $($_.Exception.Message)" -ForegroundColor Red
             $failedCount++
         }
     }
@@ -281,6 +482,22 @@ function Get-ExecutablePathAndArgsFromXml {
     }
 }
 
+function Convert-TriggerTypeToShortName {
+    param([string]$TriggerType)
+    
+    switch ($TriggerType) {
+        "BootTrigger" { return "Boot" }
+        "LogonTrigger" { return "Logon" }
+        "TimeTrigger" { return "Time" }
+        "CalendarTrigger" { return "Calendar" }
+        "IdleTrigger" { return "Idle" }
+        "EventTrigger" { return "Event" }
+        "RegistrationTrigger" { return "Registration" }
+        "SessionStateChangeTrigger" { return "SessionStateChange" }
+        default { return $TriggerType }
+    }
+}
+
 # Function to extract triggers from XML task
 function Get-TriggersFromXml {
     param([object]$Xml)
@@ -289,24 +506,8 @@ function Get-TriggersFromXml {
     
     if ($Xml.Task.Triggers) {
         foreach ($trigger in $Xml.Task.Triggers.ChildNodes) {
-            $triggerType = $trigger.LocalName
-            $triggerInfo = ""
-            
-            switch ($triggerType) {
-                "BootTrigger" { $triggerInfo = "Boot" }
-                "LogonTrigger" { $triggerInfo = "Logon" }
-                "TimeTrigger" { $triggerInfo = "Time" }
-                "CalendarTrigger" { $triggerInfo = "Calendar" }
-                "IdleTrigger" { $triggerInfo = "Idle" }
-                "EventTrigger" { $triggerInfo = "Event" }
-                "RegistrationTrigger" { $triggerInfo = "Registration" }
-                "SessionStateChangeTrigger" { $triggerInfo = "SessionStateChange" }
-                default { $triggerInfo = $triggerType }
-            }
-            
-            if ($triggerInfo) {
-                $taskTriggers += $triggerInfo
-            }
+            if (-not $trigger -or -not $trigger.LocalName) { continue }
+            $taskTriggers += Convert-TriggerTypeToShortName -TriggerType $($trigger.LocalName)
         }
     }
     
@@ -328,9 +529,23 @@ function Test-TaskHasSpecifiedTriggers {
     if ($Xml.Task.Triggers) {
         foreach ($trigger in $Xml.Task.Triggers.ChildNodes) {
             $triggerType = $trigger.LocalName
+            $triggerShortName = ""
+            
+            # Convert trigger type to short name for comparison
+            switch ($triggerType) {
+                "BootTrigger" { $triggerShortName = "Boot" }
+                "LogonTrigger" { $triggerShortName = "Logon" }
+                "TimeTrigger" { $triggerShortName = "Time" }
+                "CalendarTrigger" { $triggerShortName = "Calendar" }
+                "IdleTrigger" { $triggerShortName = "Idle" }
+                "EventTrigger" { $triggerShortName = "Event" }
+                "RegistrationTrigger" { $triggerShortName = "Registration" }
+                "SessionStateChangeTrigger" { $triggerShortName = "SessionStateChange" }
+                default { $triggerShortName = $triggerType }
+            }
             
             # Check if this trigger type is in the specified triggers
-            if ($SpecifiedTriggers -contains $triggerType) {
+            if ($SpecifiedTriggers -contains $triggerShortName) {
                 return $true
             }
         }
@@ -393,37 +608,30 @@ function Format-PathWithQuotes {
     }
 }
 
-# Function to create application entry from executable path and arguments
+# Function to create application entry from ScheduledTask object
 function New-ApplicationEntry {
     param(
-        [string]$ExecutablePath,
-        [string]$WorkingDirectory,
-        [string]$Arguments = "",
-        [string]$Triggers = ""
+        [ScheduledTask]$Task
     )
     
+    # Get primary executable
+    $primaryExecutable = $Task.GetPrimaryExecutable()
+    if (-not $primaryExecutable) {
+        return $null
+    }
+    
     # Create application entry with default settings
-    $app = $Script:DefaultAppSettings.Clone()
+    $app = [ApplicationEntry]::new($null, $Script:DefaultAppSettings)
     
-    # Ensure consistent quote formatting for FileName (just the executable)
-    $app.FileName = Format-PathWithQuotes -Path $ExecutablePath
-    
-    # Build the Command with arguments if present
-    if ($Arguments) {
-        $app.Command = "$(Format-PathWithQuotes -Path $ExecutablePath) $Arguments"
-    }
-    else {
-        $app.Command = Format-PathWithQuotes -Path $ExecutablePath
-    }
-    
-    $app.WorkingDirectory = Format-PathWithQuotes -Path $WorkingDirectory
-    $app.Triggers = $Triggers
+    # Set basic properties
+    $app.FileName = $primaryExecutable.GetFileName()
+    $app.Command = $primaryExecutable.ToString()
+    $app.WorkingDirectory = Format-PathWithQuotes -Path $Task.WorkingDirectory
+    $app.Triggers = $Task.Triggers -join ","
     
     # Apply application-specific overrides if they exist
-    if ($Script:AppOverrides.ContainsKey($ExecutablePath)) {
-        foreach ($overrideKey in $Script:AppOverrides[$ExecutablePath].Keys) {
-            $app[$overrideKey] = $Script:AppOverrides[$ExecutablePath][$overrideKey]
-        }
+    if ($Script:AppOverrides.ContainsKey($primaryExecutable.Path)) {
+        $app.ApplyOverrides($Script:AppOverrides[$primaryExecutable.Path])
     }
     
     return $app
@@ -447,7 +655,7 @@ function Get-TaskXmlFiles {
     return $taskXmlFiles
 }
 
-# Function to process task XML file and return task object
+# Function to process task XML file and return ScheduledTask object
 function Process-TaskXmlFile {
     param(
         [System.IO.FileInfo]$XmlFile,
@@ -465,33 +673,6 @@ function Process-TaskXmlFile {
         # Create XML object
         $xml = [xml]$xmlContent
         
-        # Check if task has specified triggers (if any specified)
-        if (-not (Test-TaskHasSpecifiedTriggers -Xml $xml -SpecifiedTriggers $SpecifiedTriggers)) {
-            return $null
-        }
-        
-        # Check if task is enabled (if EnabledOnly is specified)
-        if ($EnabledOnly -and -not (Test-TaskIsEnabled -Xml $xml)) {
-            return $null
-        }
-        
-        # Extract executable path and arguments from the task
-        $execInfo = Get-ExecutablePathAndArgsFromXml -Xml $xml
-        $executablePath = $execInfo.ExecutablePath
-        $arguments = $execInfo.Arguments
-        
-        # Debug: Show first few tasks
-        if ($ProcessedCount -le 10) {
-            Write-Host "Task: $($XmlFile.Name)" -ForegroundColor DarkGray
-            Write-Host "  Executable: $executablePath" -ForegroundColor DarkGray
-            if ($arguments) {
-                Write-Host "  Arguments: $arguments" -ForegroundColor DarkGray
-            }
-        }
-        
-        # Skip if no executable found
-        if (-not $executablePath) { return $null }
-        
         # Extract task path from the XML file path
         $taskPath = $XmlFile.FullName
         # Convert to relative task path format (e.g., \Startup\Microsoft\Task)
@@ -505,32 +686,74 @@ function Process-TaskXmlFile {
             $taskPath = $taskPath -replace ".*\\ScheduledJobs", ""
         }
         
+        # Create task object
+        $task = [ScheduledTask]::new($taskPath, $XmlFile.Name)
+        
         # Check if task should be ignored based on task path
-        if (Test-TaskShouldBeIgnored -TaskPath $taskPath -IgnorePatterns $IgnorePatterns) {
-            Write-Host "Ignoring task due to pattern match: $taskPath -> $executablePath" -ForegroundColor Yellow
+        if ($task.ShouldBeIgnored($IgnorePatterns)) {
+            Write-Host "Ignoring task due to pattern match: $($task.ToString())" -ForegroundColor Yellow
+            return $null
+        }
+        
+        # Check if task is enabled (if EnabledOnly is specified)
+        if ($EnabledOnly -and -not (Test-TaskIsEnabled -Xml $xml)) {
+            return $null
+        }
+        
+        # Extract executable path and arguments from the task
+        $execInfo = Get-ExecutablePathAndArgsFromXml -Xml $xml
+        $executablePath = $execInfo.ExecutablePath
+        $arguments = $execInfo.Arguments
+        
+        # Skip if no executable found
+        if (-not $executablePath) { return $null }
+        
+        # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
+        if ($executablePath -ilike "*RestartOnCrash.exe*") {
+            Write-Verbose "Skipping RestartOnCrash.exe: $($task.ToString()) -> $executablePath"
             return $null
         }
         
         # Verify executable exists
         if (-not [System.IO.File]::Exists($executablePath)) { return $null }
         
-        # Extract triggers from XML
+        # Extract working directory
+        $workingDirectory = Get-WorkingDirectoryFromXml -Xml $xml
+        
+        # Extract triggers
         $taskTriggers = Get-TriggersFromXml -Xml $xml
         
-        # Get working directory
-        $workingDir = Get-WorkingDirectory -ExecutablePath $executablePath
+        # Set task properties
+        $task.Enabled = Test-TaskIsEnabled -Xml $xml
+        $task.WorkingDirectory = $workingDirectory
         
-        # Create and return task object
-        return [PSCustomObject]@{
-            TaskName         = $XmlFile.Name
-            ExecutablePath   = $executablePath
-            Arguments        = $arguments
-            WorkingDirectory = $workingDir
-            TaskTriggers     = $taskTriggers
+        # Add executable
+        $executable = [Executable]::new($executablePath, $arguments)
+        $task.AddExecutable($executable)
+        
+        # Add triggers
+        foreach ($trigger in $taskTriggers) {
+            $task.AddTrigger($trigger)
         }
+        
+        # Check if task has specified triggers (if any specified)
+        if (-not $task.HasAnyTrigger($SpecifiedTriggers)) {
+            return $null
+        }
+        
+        # Debug: Show first few tasks
+        if ($ProcessedCount -le 10) {
+            Write-Host "Task: $($task.ToString())" -ForegroundColor DarkGray
+            Write-Host "  Executable: $($task.GetPrimaryExecutablePath())" -ForegroundColor DarkGray
+            if ($arguments) {
+                Write-Host "  Arguments: $arguments" -ForegroundColor DarkGray
+            }
+        }
+        
+        return $task
     }
     catch {
-        Write-Warning "Error processing task file '$($XmlFile.Name)': $($_.Exception.Message)"
+        Write-Verbose "Error processing task $($XmlFile.Name): $($_.Exception.Message)"
         return $null
     }
 }
@@ -569,7 +792,7 @@ function Read-ExistingIniFile {
                                 $currentApp[$fixKey] = Format-PathWithQuotes $currentApp[$fixKey]
                             }
                         }
-                        $existingApplications += $currentApp.Clone()
+                        $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
                         # Save section name and FileName if present
                         if ($currentApp.ContainsKey("FileName")) {
                             $sectionFileNames[$currentSection] = $currentApp["FileName"]
@@ -612,7 +835,7 @@ function Read-ExistingIniFile {
                         $currentApp[$fixKey] = Format-PathWithQuotes $currentApp[$fixKey]
                     }
                 }
-                $existingApplications += $currentApp.Clone()
+                $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
                 if ($currentApp.ContainsKey("FileName")) {
                     $sectionFileNames[$currentSection] = $currentApp["FileName"]
                 }
@@ -672,11 +895,15 @@ function Write-IniContent {
     for ($i = 0; $i -lt $Applications.Count; $i++) {
         $app = $Applications[$i]
         $content += "[Application$i]"
-        foreach ($key in $app.Keys | Sort-Object) {
+        
+        # Convert ApplicationEntry to hashtable for processing
+        $appHashtable = $app.ToHashtable()
+        
+        foreach ($key in $appHashtable.Keys | Sort-Object) {
             # Skip Triggers field unless WriteExtra is enabled
             if ($key -eq "Triggers" -and -not $WriteExtra) { continue }
             
-            $value = $app[$key]
+            $value = $appHashtable[$key]
             # The values are already properly formatted with quotes where needed
             $content += "$key=$value"
         }
@@ -687,8 +914,24 @@ function Write-IniContent {
     $content | Out-File -FilePath $FilePath -Encoding UTF8
 }
 
+function Sanitize-CommandLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, Position = 0)]
+        [string]$CommandLine
+    )
+    process {
+        if ($null -ne $CommandLine) {
+            return $CommandLine -replace '"', "'"
+        }
+    }
+}
+
 # Main script logic
 try {
+    Set-Variable -Name "commandLine" -Value ($MyInvocation.Line | Sanitize-CommandLine) -Scope Global
+    Write-Host "Script Command Line: $commandLine"
+
     Write-Host "Extracting scheduled tasks from XML files..." -ForegroundColor Green
 
     Write-Host "Using output path: $OutputPath"
@@ -737,7 +980,6 @@ try {
     # Convert tasks to application format
     $applications = @()
     $processedExecutables = @{}
-    $executableTriggers = @{}  # Store triggers for each executable
     
     # Single pass: Process each task XML file and collect all necessary information
     $processedCount = 0
@@ -753,14 +995,6 @@ try {
         
         if ($taskObject) {
             $validTasks += $taskObject
-            
-            # Store triggers for this executable (for combining later)
-            if ($taskObject.TaskTriggers.Count -gt 0) {
-                if (-not $executableTriggers.ContainsKey($taskObject.ExecutablePath)) {
-                    $executableTriggers[$taskObject.ExecutablePath] = @()
-                }
-                $executableTriggers[$taskObject.ExecutablePath] += $taskObject.TaskTriggers -join ","
-            }
         }
     }
     
@@ -785,25 +1019,16 @@ try {
     
     # Create application entries from collected task objects
     foreach ($task in $validTasks) {
+        # Get primary executable path for deduplication
+        $executablePath = $task.GetPrimaryExecutablePath()
+        
         # Skip if already processed (duplicate executable)
-        if ($processedExecutables.ContainsKey($task.ExecutablePath)) {
+        if ($processedExecutables.ContainsKey($executablePath)) {
             continue
-        }
-        
-        # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
-        if ($task.ExecutablePath -ilike "*RestartOnCrash.exe*") {
-            Write-Verbose "Skipping RestartOnCrash.exe: $($task.TaskName) -> $($task.ExecutablePath)"
-            continue
-        }
-        
-        # Get combined triggers for this executable
-        $combinedTriggers = ""
-        if ($executableTriggers.ContainsKey($task.ExecutablePath)) {
-            $combinedTriggers = ($executableTriggers[$task.ExecutablePath] | Sort-Object -Unique) -join ", "
         }
         
         # Create application entry
-        $app = New-ApplicationEntry -ExecutablePath $task.ExecutablePath -WorkingDirectory $task.WorkingDirectory -Arguments $task.Arguments -Triggers $combinedTriggers
+        $app = New-ApplicationEntry -Task $task
         
         # Check if this application already exists in merge mode
         if ($Merge) {
@@ -820,9 +1045,9 @@ try {
         }
         
         $applications += $app
-        $processedExecutables[$task.ExecutablePath] = $true
+        $processedExecutables[$executablePath] = $true
         
-        Write-Host "Added: $($task.TaskName) -> $($task.ExecutablePath)" -ForegroundColor Cyan
+        Write-Host "Added: $($task.ToString()) -> $($task.GetPrimaryExecutablePath())" -ForegroundColor Cyan
         if ($app.Triggers) {
             Write-Host "  Triggers: $($app.Triggers)" -ForegroundColor DarkCyan
         }
