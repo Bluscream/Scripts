@@ -173,6 +173,7 @@ class Executable {
     
     [string]ToString() {
         $commandLine = if ($this.Arguments) { "$($this.Path) $($this.Arguments)" } else { $this.Path }
+        Write-Verbose "Will try to parse command line for Executable $($this.Path)"
         $parsedCommand = Parse-CommandLine -CommandLine $commandLine
         $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
         $result = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -395,21 +396,52 @@ function Show-ApplicationSummary {
 function Get-ExecutablePathAndArgsFromXml {
     param([object]$Xml)
     
-    $executablePath = $null
-    $arguments = $null
+    $executables = @()
     
     # Look for executable and arguments in various possible locations
     if ($Xml.Task.Actions.Exec.Command) {
-        $command = $Xml.Task.Actions.Exec.Command
-        $taskArgs = $Xml.Task.Actions.Exec.Arguments
-        
-        $parsedCommand = Parse-CommandLine -CommandLine $command
-        $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-        $arguments = $parsedCommand[1] -join " "
-        
-        # Get arguments if present in XML (this takes precedence)
-        if ($taskArgs) {
-            $arguments += $taskArgs
+        # Handle multiple Exec actions properly
+        if ($Xml.Task.Actions.Exec.Command -is [array]) {
+            # Multiple Exec actions - process each one
+            for ($i = 0; $i -lt $Xml.Task.Actions.Exec.Command.Count; $i++) {
+                $command = $Xml.Task.Actions.Exec.Command[$i]
+                $taskArgs = if ($Xml.Task.Actions.Exec.Arguments -is [array] -and $i -lt $Xml.Task.Actions.Exec.Arguments.Count) { 
+                    $Xml.Task.Actions.Exec.Arguments[$i] 
+                }
+                else { 
+                    $Xml.Task.Actions.Exec.Arguments 
+                }
+                
+                Write-Verbose "[Get-ExecutablePathAndArgsFromXml] Processing Exec action $($i + 1) for Task $($Xml.Task.Name) -> $command"
+                
+                $parsedCommand = Parse-CommandLine -CommandLine $command
+                $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
+                $arguments = $parsedCommand[1] -join " "
+                
+                # Get arguments if present in XML (this takes precedence)
+                if ($taskArgs) {
+                    $arguments += $taskArgs
+                }
+                
+                $executables += [Executable]::new($executablePath, $arguments)
+            }
+        }
+        else {
+            # Single Exec action
+            $command = $Xml.Task.Actions.Exec.Command
+            $taskArgs = $Xml.Task.Actions.Exec.Arguments
+            Write-Verbose "[Get-ExecutablePathAndArgsFromXml] Will try to parse command line for Task $($Xml.Task.Name) -> $command"
+            
+            $parsedCommand = Parse-CommandLine -CommandLine $command
+            $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
+            $arguments = $parsedCommand[1] -join " "
+            
+            # Get arguments if present in XML (this takes precedence)
+            if ($taskArgs) {
+                $arguments += $taskArgs
+            }
+            
+            $executables += [Executable]::new($executablePath, $arguments)
         }
     }
     elseif ($Xml.Task.Actions.Exec.WorkingDirectory) {
@@ -419,15 +451,12 @@ function Get-ExecutablePathAndArgsFromXml {
             $exeFiles = Get-ChildItem -Path $workingDir -Filter "*.exe" -ErrorAction SilentlyContinue
             if ($exeFiles.Count -eq 1) {
                 $executablePath = $exeFiles[0].FullName
-                # No arguments in this case
+                $executables += [Executable]::new($executablePath, "")
             }
         }
     }
     
-    return @{
-        ExecutablePath = $executablePath
-        Arguments      = $arguments
-    }
+    return $executables
 }
 
 function Convert-TriggerTypeToShortName {
@@ -824,8 +853,8 @@ function Parse-CommandLine {
     
     Write-Verbose "Parsed path: '$path', arguments: $($arguments -join ' ')"
     
-    # Special handling for unquoted paths with spaces
-    # Only apply this logic if the original path is not a valid executable
+    # Simple approach: split by space and check if first part is already a valid path
+    # If not, keep adding parts until we find a valid path
     $originalPath = $path
     $originalArguments = $arguments.Clone()
     
@@ -838,45 +867,113 @@ function Parse-CommandLine {
     catch {
         Write-Verbose "Path is not valid as-is: '$testPath'"
         
-        # Only try the backwards logic if the path contains spaces (indicating it might be split)
-        if ($path -match '\s') {
-            Write-Verbose "Path contains spaces, trying backwards combination logic"
+        # Parse the command line properly, respecting quoted strings
+        $parts = @()
+        $currentPart = ""
+        $inQuotes = $false
+        $escapeNext = $false
+        
+        for ($i = 0; $i -lt $CommandLine.Length; $i++) {
+            $char = $CommandLine[$i]
             
-            # Build the full command line by combining path and all arguments
-            $fullCommandLine = "$path $($arguments -join ' ')"
-            Write-Verbose "Full command line: '$fullCommandLine'"
+            if ($escapeNext) {
+                $currentPart += $char
+                $escapeNext = $false
+                continue
+            }
             
-            # Start with the full command line and work backwards
-            $currentArgs = $arguments.Clone()
-            $foundValidPath = $false
+            if ($char -eq '\' -and $i -lt ($CommandLine.Length - 1) -and $CommandLine[$i + 1] -eq '"') {
+                $escapeNext = $true
+                continue
+            }
             
-            while ($currentArgs.Count -gt 0) {
-                # Try the current path with the remaining arguments
-                $testCommandLine = "$path $($currentArgs -join ' ')"
-                $testPath = [Environment]::ExpandEnvironmentVariables($testCommandLine)
-                
+            if ($char -eq '"') {
+                $inQuotes = -not $inQuotes
+                $currentPart += $char
+                continue
+            }
+            
+            if ($char -eq ' ' -and -not $inQuotes) {
+                # End of current part
+                if ($currentPart -ne "") {
+                    $parts += $currentPart
+                    $currentPart = ""
+                }
+                continue
+            }
+            
+            $currentPart += $char
+        }
+        
+        # Handle the last part
+        if ($currentPart -ne "") {
+            $parts += $currentPart
+        }
+        
+        Write-Verbose "Properly parsed command line into parts: $($parts -join ' | ')"
+        
+        # If the path is not valid and we have multiple parts, try to combine them
+        # This handles the case where an unquoted path with spaces was incorrectly split
+        if ($parts.Count -gt 1) {
+            Write-Verbose "Path is not valid and we have multiple parts, trying to combine them"
+             
+            # Try combining parts until we find a valid path
+            $combinedPath = $parts[0]
+            $remainingParts = $parts[1..($parts.Count - 1)]
+             
+            foreach ($part in $remainingParts) {
+                $testPath = [Environment]::ExpandEnvironmentVariables("$combinedPath $part")
+                 
                 try {
                     $testItem = Get-Item -Path $testPath -ErrorAction Stop
-                    Write-Verbose "Found valid path by working backwards: '$testPath'"
-                    $path = $testCommandLine
-                    $arguments = @()  # No arguments left, they're all part of the path
+                    Write-Verbose "Found valid path by combining: '$testPath'"
+                    $path = "$combinedPath $part"
+                    # The arguments should be the parts that come after the valid path
+                    $partIndex = $remainingParts.IndexOf($part)
+                    if ($partIndex -ge 0 -and $partIndex -lt ($remainingParts.Count - 1)) {
+                        $arguments = $remainingParts[($partIndex + 1)..($remainingParts.Count - 1)]
+                    }
+                    else {
+                        $arguments = @()
+                    }
                     $foundValidPath = $true
                     break
                 }
                 catch {
-                    Write-Verbose "Path still invalid: '$testPath'"
-                    # Remove the last argument and try again
-                    $currentArgs = $currentArgs[0..($currentArgs.Count - 2)]
+                    try {
+                        $commandInfo = Get-Command -Name "$combinedPath $part" -ErrorAction Stop
+                        Write-Verbose "Found executable in PATH by combining: $($commandInfo.Source)"
+                        $path = "$combinedPath $part"
+                        # The arguments should be the parts that come after the valid path
+                        $partIndex = $remainingParts.IndexOf($part)
+                        if ($partIndex -ge 0 -and $partIndex -lt ($remainingParts.Count - 1)) {
+                            $arguments = $remainingParts[($partIndex + 1)..($remainingParts.Count - 1)]
+                        }
+                        else {
+                            $arguments = @()
+                        }
+                        $foundValidPath = $true
+                        break
+                    }
+                    catch {
+                        Write-Verbose "Combination not valid: '$testPath', continuing"
+                        $combinedPath = "$combinedPath $part"
+                    }
                 }
             }
-            
-            # If we never found a valid path, throw an exception
+             
+            # If we never found a valid path, use the original
             if (-not $foundValidPath) {
-                throw "Could not find a valid path by working backwards. Original path: '$originalPath', arguments: $($originalArguments -join ' ')"
+                Write-Host "Could not find a valid path by combining parts, using original path: '$originalPath'" -ForegroundColor Red
+                $path = $originalPath
+                $arguments = $originalArguments
             }
         }
         else {
-            Write-Verbose "Path does not contain spaces, keeping original path and arguments"
+            # Only one part, just use the original path
+            Write-Verbose "Path is not valid and only one part, using original path: '$originalPath'"
+            $path = $originalPath
+            $arguments = $originalArguments
         }
     }
     
@@ -884,13 +981,23 @@ function Parse-CommandLine {
     $expandedPath = [Environment]::ExpandEnvironmentVariables($path)
     try {
         $pathItem = Get-Item -Path $expandedPath -ErrorAction Stop
-        Write-Verbose "Successfully parsed $($pathItem.PSIsContainer ? 'directory' : 'file'): $($pathItem.FullName) $($arguments -join ' ')"
+        Write-Host "Successfully parsed $($pathItem.PSIsContainer ? 'directory' : 'file'): $($pathItem.FullName) $($arguments -join ' ')" -ForegroundColor Green
         return ($pathItem, $arguments)
     }
     catch {
         Write-Verbose "Failed to get Get-Item object for '$expandedPath': $($_.Exception.Message)"
-        # Return the expanded path as string if Get-Item fails
-        return ($expandedPath, $arguments)
+        
+        # Try to find the executable in the system PATH
+        try {
+            $commandInfo = Get-Command -Name $path -ErrorAction Stop
+            Write-Host "Found executable in PATH: $($commandInfo.Source) $($arguments -join ' ')" -ForegroundColor Green
+            return (Get-Item -Path $commandInfo.Source), $arguments
+        }
+        catch {
+            Write-Verbose "Failed to find executable in PATH: $path"
+            # Return the expanded path as string if both Get-Item and Get-Command fail
+            return ($expandedPath, $arguments)
+        }
     }
 }
 
@@ -986,16 +1093,19 @@ function Process-TaskXmlFileToApplicationEntry {
             return $null
         }
         
-        # Extract executable path and arguments from the task
-        $execInfo = Get-ExecutablePathAndArgsFromXml -Xml $xml
-        $executablePath = $execInfo.ExecutablePath
-        $arguments = $execInfo.Arguments
+        Write-Verbose "[Process-TaskXmlFileToApplicationEntry] Will try to get executable path and arguments from task $($XmlFile.FullName)"
+        $executables = Get-ExecutablePathAndArgsFromXml -Xml $xml
         
-        # Skip if no executable found
-        if (-not $executablePath) { 
-            Write-Verbose "No executable found for task: $($XmlFile.Name)"
+        # Skip if no executables found
+        if ($executables.Count -eq 0) { 
+            Write-Verbose "No executables found for task: $($XmlFile.Name)"
             return $null 
         }
+        
+        # Use the first executable for now (we could create multiple ApplicationEntry objects if needed)
+        $primaryExecutable = $executables[0]
+        $executablePath = $primaryExecutable.Path
+        $arguments = $primaryExecutable.Arguments
         
         # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
         if ($executablePath -ilike "*RestartOnCrash.exe*") {
@@ -1042,6 +1152,7 @@ function Process-TaskXmlFileToApplicationEntry {
         $app.FileName = [System.IO.Path]::GetFileName($executablePath)
         # Use Parse-CommandLine for robust command line handling
         $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
+        Write-Verbose "[Process-TaskXmlFileToApplicationEntry] Will try to parse command line for Task $($XmlFile.FullName) -> $($app.FileName)"
         $parsedCommand = Parse-CommandLine -CommandLine $commandLine
         $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
         $app.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -1444,6 +1555,7 @@ function Convert-StartupEntryToApplicationEntry {
         if ($StartupEntry.Command) {
             $command = $StartupEntry.Command.Trim()
             try {
+                Write-Verbose "Will try to parse command line for startup entry $command"
                 $parsedCommand = Parse-CommandLine -CommandLine $command
                 $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                 $arguments = $parsedCommand[1] -join " "
@@ -1484,6 +1596,7 @@ function Convert-StartupEntryToApplicationEntry {
         $entry.FileName = $executablePath
         # Use Parse-CommandLine for robust command line handling
         $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
+        Write-Verbose "Will try to parse command line for Startup Entry $($StartupEntry.Name)"
         $parsedCommand = Parse-CommandLine -CommandLine $commandLine
         $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
         $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -1605,13 +1718,16 @@ function Load-StartupTasks {
                     continue
                 }
             
-                # Extract executable path and arguments
-                $execInfo = Get-ExecutablePathAndArgsFromXml -Xml $xml
-                $executablePath = $execInfo.ExecutablePath
-                $arguments = $execInfo.Arguments
-            
-                # Skip if no executable found
-                if (-not $executablePath) { continue }
+                Write-Verbose "[Load-StartupTasks] Will try to get executable path and arguments from task $($xmlFile.FullName)"
+                $executables = Get-ExecutablePathAndArgsFromXml -Xml $xml
+                
+                # Skip if no executables found
+                if ($executables.Count -eq 0) { continue }
+                
+                # Use the first executable for now (we could create multiple ApplicationEntry objects if needed)
+                $primaryExecutable = $executables[0]
+                $executablePath = $primaryExecutable.Path
+                $arguments = $primaryExecutable.Arguments
             
                 # Skip RestartOnCrash.exe
                 if ($executablePath -ilike "*RestartOnCrash.exe*") { continue }
@@ -1644,6 +1760,7 @@ function Load-StartupTasks {
                 $app.FileName = [System.IO.Path]::GetFileName($executablePath)
                 # Use Parse-CommandLine for robust command line handling
                 $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
+                Write-Verbose "[Load-StartupTasks] Will try to parse command line for Task $($xmlFile.FullName) -> $($app.FileName)"
                 $parsedCommand = Parse-CommandLine -CommandLine $commandLine
                 $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                 $app.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -1728,6 +1845,7 @@ function Load-StartupScripts {
                             $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                             $entry.FileName = $scriptPath
                             # Use Parse-CommandLine for robust command line handling
+                            Write-Verbose "[Load-StartupScripts] Will try to parse command line for Script $($scriptPath)"
                             $parsedCommand = Parse-CommandLine -CommandLine $scriptPath
                             $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                             $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -1744,6 +1862,7 @@ function Load-StartupScripts {
                 $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                 $entry.FileName = $file.FullName
                 # Use Parse-CommandLine for robust command line handling
+                Write-Verbose "Will try to parse command line for Startup File $($file.FullName)"
                 $parsedCommand = Parse-CommandLine -CommandLine $file.FullName
                 $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                 $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
@@ -1783,6 +1902,7 @@ function Load-StartupRegistry {
 
                 # Try to extract the executable path and arguments using our helper function
                 try {
+                    Write-Verbose "Will try to parse command line for Startup Registry $($name)"
                     $parsedCommand = Parse-CommandLine -CommandLine $commandLine
                     $exePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                     $arguments = $parsedCommand[1] -join " "
@@ -1858,6 +1978,7 @@ function Load-StartupFiles {
         $entry.FileName = $targetPath
         # Use Parse-CommandLine for robust command line handling
         $commandLine = if ($arguments) { "$targetPath $arguments" } else { $targetPath }
+        Write-Verbose "Will try to parse command line for Startup File $($file.FullName)"
         $parsedCommand = Parse-CommandLine -CommandLine $commandLine
         $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
         $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
