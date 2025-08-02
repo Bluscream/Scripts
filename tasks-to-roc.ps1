@@ -17,12 +17,9 @@
  .PARAMETER NoElevate
      Skip automatic elevation to administrator privileges.
      
- .PARAMETER Triggers
-     Filter tasks to only include those with specified trigger types.
-     Valid values: Boot, Logon, Time, Calendar, Idle, Event, Registration, SessionStateChange
-     
- .PARAMETER EnabledOnly
-     Only process tasks that are enabled (skip disabled tasks).
+ .PARAMETER StartupTasks
+     Only process scheduled tasks that are triggered on Boot or Logon and are enabled.
+     This is equivalent to using -Triggers Boot,Logon -EnabledOnly.
      
  .PARAMETER DisableTasks
      Stop and disable the scheduled tasks after successful conversion (requires administrator privileges).
@@ -37,6 +34,15 @@
      Array of patterns to ignore tasks based on their task path. Patterns are automatically wrapped with wildcards (*pattern*) and matched case-insensitively.
      Example: -Ignore "Microsoft","OneDrive","Windows"
      
+ .PARAMETER StartupFiles
+     Include startup files from common startup locations (Startup folders, Win.ini, etc.).
+     
+ .PARAMETER StartupRegistry
+     Include startup applications from registry keys (Run, RunOnce, etc.).
+     
+ .PARAMETER StartupLogonScripts
+     Include logon scripts from Group Policy and registry.
+     
  .EXAMPLE
      .\tasks-to-roc.ps1 -OutputPath "C:\temp\restart-on-crash.ini"
      
@@ -46,19 +52,13 @@
      .\tasks-to-roc.ps1 -NoElevate -OutputPath "C:\temp\restart-on-crash.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -OutputPath "C:\temp\boot-logon-tasks.ini"
+     .\tasks-to-roc.ps1 -StartupTasks -OutputPath "C:\temp\startup-tasks.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -EnabledOnly -OutputPath "C:\temp\enabled-tasks.ini"
-     
- .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -EnabledOnly -OutputPath "C:\temp\enabled-boot-logon.ini"
+     .\tasks-to-roc.ps1 -StartupTasks -DisableTasks -OutputPath "C:\temp\startup-tasks-disabled.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -DisableTasks -OutputPath "C:\temp\restart-on-crash.ini"
-     
- .EXAMPLE
-     .\tasks-to-roc.ps1 -Triggers "Boot","Logon" -DisableTasks -OutputPath "C:\temp\boot-logon-disabled.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -Merge -OutputPath "C:\temp\existing-config.ini"
@@ -68,13 +68,18 @@
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -Ignore "Microsoft","OneDrive" -OutputPath "C:\temp\filtered-tasks.ini"
+     
+ .EXAMPLE
+     .\tasks-to-roc.ps1 -StartupFiles -StartupRegistry -OutputPath "C:\temp\startup-apps.ini"
+     
+ .EXAMPLE
+     .\tasks-to-roc.ps1 -StartupFiles -StartupRegistry -StartupLogonScripts -OutputPath "C:\temp\all-startup.ini"
 #>
 
 param(
     [string]$OutputPath = ".\restart-on-crash.ini",
     [switch]$NoElevate,
-    [string[]]$Triggers = @(),
-    [switch]$EnabledOnly,
+    [switch]$StartupTasks,
     [switch]$DisableTasks,
     [switch]$Merge,
     [switch]$WriteExtra,
@@ -446,6 +451,69 @@ function Get-WorkingDirectory {
         return [System.IO.Path]::GetDirectoryName($ExecutablePath)
     }
     return ""
+}
+
+function Load-StartupTasks {
+    <#
+    .SYNOPSIS
+        Loads scheduled tasks that are triggered on Boot or Logon and are enabled.
+    .DESCRIPTION
+        Scans all scheduled tasks and returns only those that have Boot or Logon triggers and are enabled.
+        This function forces -Triggers Boot,Logon and -EnabledOnly parameters internally.
+    .OUTPUTS
+        [ScheduledTask[]]
+    #>
+    
+    Write-Host "Loading startup tasks (Boot/Logon triggers, enabled only)..." -ForegroundColor Green
+    
+    # Define task paths to scan
+    $taskPaths = @(
+        "$env:SystemRoot\System32\Tasks",
+        "$env:SystemRoot\Tasks"
+    )
+    
+    # Add user-specific task paths
+    $userProfiles = Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+    foreach ($user in $userProfiles) {
+        $userTaskPath = "$($user.FullName)\AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs"
+        if (Test-Path $userTaskPath) {
+            $taskPaths += $userTaskPath
+        }
+    }
+    
+    # Scan for task XML files
+    $taskXmlFiles = Get-TaskXmlFiles -TaskPaths $taskPaths
+    Write-Host "Found $($taskXmlFiles.Count) total task files" -ForegroundColor Yellow
+    
+    # Force specific triggers and enabled only
+    $forcedTriggers = @("Boot", "Logon")
+    $forcedEnabledOnly = $true
+    
+    Write-Host "Filtering tasks to only include triggers: $($forcedTriggers -join ', ')" -ForegroundColor Cyan
+    Write-Host "Filtering tasks to only include enabled tasks" -ForegroundColor Cyan
+    
+    # Convert tasks to application format
+    $validTasks = @()
+    $processedCount = 0
+    
+    foreach ($xmlFile in $taskXmlFiles) {
+        $processedCount++
+        if ($processedCount % 50 -eq 0) {
+            Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
+        }
+        
+        $taskObject = Process-TaskXmlFile -XmlFile $xmlFile -ProcessedCount $processedCount -SpecifiedTriggers $forcedTriggers -EnabledOnly $forcedEnabledOnly -IgnorePatterns $Ignore
+        
+        if ($taskObject) {
+            $validTasks += $taskObject
+        }
+    }
+    
+    Write-Host "Startup tasks processing summary:" -ForegroundColor Yellow
+    Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
+    Write-Host "  Valid startup tasks found: $($validTasks.Count)" -ForegroundColor White
+    
+    return $validTasks
 }
 
 function Load-StartupLogonScripts {
@@ -1163,6 +1231,216 @@ function Sanitize-CommandLine {
     }
 }
 
+# Function to scan startup files from common locations
+function Get-StartupFiles {
+    [CmdletBinding()]
+    param()
+    
+    $startupFiles = @()
+    
+    # Common startup locations
+    $startupPaths = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:PROGRAMDATA\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:USERPROFILE\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+    )
+    
+    foreach ($path in $startupPaths) {
+        if (Test-Path $path) {
+            $files = Get-ChildItem -Path $path -File -ErrorAction SilentlyContinue | Where-Object {
+                $_.Extension -match '\.(exe|bat|cmd|vbs|ps1)$'
+            }
+            
+            foreach ($file in $files) {
+                $startupFiles += [PSCustomObject]@{
+                    Path   = $file.FullName
+                    Name   = $file.Name
+                    Type   = "StartupFile"
+                    Source = $path
+                }
+            }
+        }
+    }
+    
+    return $startupFiles
+}
+
+# Function to scan startup registry entries
+function Get-StartupRegistry {
+    [CmdletBinding()]
+    param()
+    
+    $startupRegistry = @()
+    
+    # Registry keys to check
+    $registryKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunServicesOnce"
+    )
+    
+    foreach ($key in $registryKeys) {
+        try {
+            $entries = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+            if ($entries) {
+                $properties = $entries.PSObject.Properties | Where-Object {
+                    $_.Name -notmatch '^PS' -and $_.Value -and $_.Value -notmatch '^$'
+                }
+                
+                foreach ($property in $properties) {
+                    $startupRegistry += [PSCustomObject]@{
+                        Name        = $property.Name
+                        Command     = $property.Value
+                        RegistryKey = $key
+                        Type        = "StartupRegistry"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not access registry key: $key"
+        }
+    }
+    
+    return $startupRegistry
+}
+
+# Function to scan logon scripts
+function Get-StartupLogonScripts {
+    [CmdletBinding()]
+    param()
+    
+    $logonScripts = @()
+    
+    # Group Policy logon scripts
+    $gpoPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Logon",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Logon"
+    )
+    
+    foreach ($path in $gpoPaths) {
+        try {
+            $scripts = Get-ChildItem -Path $path -Recurse -ErrorAction SilentlyContinue | Where-Object {
+                $_.PSChildName -eq "Script"
+            }
+            
+            foreach ($script in $scripts) {
+                $scriptPath = Get-ItemProperty -Path $script.PSPath -Name "Script" -ErrorAction SilentlyContinue
+                if ($scriptPath.Script) {
+                    $logonScripts += [PSCustomObject]@{
+                        Name        = "GPO_$($script.PSChildName)"
+                        Command     = $scriptPath.Script
+                        RegistryKey = $script.PSPath
+                        Type        = "LogonScript"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not access GPO scripts: $path"
+        }
+    }
+    
+    # User logon scripts from registry
+    $userLogonScripts = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Logon",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Logon"
+    )
+    
+    foreach ($path in $userLogonScripts) {
+        try {
+            $script = Get-ItemProperty -Path $path -Name "LogonScript" -ErrorAction SilentlyContinue
+            if ($script.LogonScript) {
+                $logonScripts += [PSCustomObject]@{
+                    Name        = "UserLogonScript"
+                    Command     = $script.LogonScript
+                    RegistryKey = $path
+                    Type        = "LogonScript"
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not access user logon scripts: $path"
+        }
+    }
+    
+    return $logonScripts
+}
+
+# Function to convert startup entry to ScheduledTask object
+function Convert-StartupEntryToTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$StartupEntry
+    )
+    
+    try {
+        $executablePath = ""
+        $arguments = ""
+        
+        # Parse command line to extract executable and arguments
+        if ($StartupEntry.Command) {
+            $command = $StartupEntry.Command.Trim()
+            
+            # Handle quoted paths
+            if ($command -match '^"([^"]+)"(.*)$') {
+                $executablePath = $matches[1]
+                $arguments = $matches[2].Trim()
+            }
+            # Handle unquoted paths
+            elseif ($command -match '^([^\s]+)(.*)$') {
+                $executablePath = $matches[1]
+                $arguments = $matches[2].Trim()
+            }
+        }
+        elseif ($StartupEntry.Path) {
+            $executablePath = $StartupEntry.Path
+        }
+        
+        # Skip if no executable found
+        if (-not $executablePath) {
+            return $null
+        }
+        
+        # Expand environment variables
+        $executablePath = [Environment]::ExpandEnvironmentVariables($executablePath)
+        
+        # Verify executable exists
+        if (-not [System.IO.File]::Exists($executablePath)) {
+            Write-Verbose "Executable not found: $executablePath"
+            return $null
+        }
+        
+        # Skip RestartOnCrash.exe
+        if ($executablePath -ilike "*RestartOnCrash.exe*") {
+            Write-Verbose "Skipping RestartOnCrash.exe: $executablePath"
+            return $null
+        }
+        
+        # Create task object
+        $task = [ScheduledTask]::new("\Startup\$($StartupEntry.Type)", $StartupEntry.Name)
+        $task.Enabled = $true
+        $task.WorkingDirectory = [System.IO.Path]::GetDirectoryName($executablePath)
+        
+        # Add executable
+        $executable = [Executable]::new($executablePath, $arguments)
+        $task.AddExecutable($executable)
+        
+        # Add startup trigger
+        $task.AddTrigger("Logon")
+        
+        return $task
+    }
+    catch {
+        Write-Verbose "Error converting startup entry: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 # Main script logic
 try {
     Set-Variable -Name "commandLine" -Value ($MyInvocation.Line | Sanitize-CommandLine) -Scope Global
@@ -1192,16 +1470,6 @@ try {
     $taskXmlFiles = Get-TaskXmlFiles -TaskPaths $taskPaths
     Write-Host "Found $($taskXmlFiles.Count) total task files" -ForegroundColor Yellow
     
-    # Show trigger filtering info if specified
-    if ($Triggers.Count -gt 0) {
-        Write-Host "Filtering tasks to only include triggers: $($Triggers -join ', ')" -ForegroundColor Cyan
-    }
-    
-    # Show enabled-only filtering info if specified
-    if ($EnabledOnly) {
-        Write-Host "Filtering tasks to only include enabled tasks" -ForegroundColor Cyan
-    }
-    
     # Show ignore patterns info if specified
     if ($Ignore.Count -gt 0) {
         Write-Host "Ignoring tasks matching patterns: $($Ignore -join ', ')" -ForegroundColor Cyan
@@ -1217,26 +1485,80 @@ try {
     $applications = @()
     $processedExecutables = @{}
     
-    # Single pass: Process each task XML file and collect all necessary information
-    $processedCount = 0
+    # Load tasks based on parameters
     $validTasks = @()
     
-    foreach ($xmlFile in $taskXmlFiles) {
-        $processedCount++
-        if ($processedCount % 50 -eq 0) {
-            Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
+    if ($StartupTasks) {
+        # Use the new Load-StartupTasks function
+        $validTasks = Load-StartupTasks
+    }
+    else {
+        # Original logic for processing all tasks
+        $processedCount = 0
+        
+        foreach ($xmlFile in $taskXmlFiles) {
+            $processedCount++
+            if ($processedCount % 50 -eq 0) {
+                Write-Host "Processed $processedCount of $($taskXmlFiles.Count) task files..." -ForegroundColor Gray
+            }
+            
+            $taskObject = Process-TaskXmlFile -XmlFile $xmlFile -ProcessedCount $processedCount -SpecifiedTriggers @() -EnabledOnly $false -IgnorePatterns $Ignore
+            
+            if ($taskObject) {
+                $validTasks += $taskObject
+            }
         }
         
-        $taskObject = Process-TaskXmlFile -XmlFile $xmlFile -ProcessedCount $processedCount -SpecifiedTriggers $Triggers -EnabledOnly $EnabledOnly -IgnorePatterns $Ignore
-        
-        if ($taskObject) {
-            $validTasks += $taskObject
-        }
+        Write-Host "Processing summary:" -ForegroundColor Yellow
+        Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
+        Write-Host "  Valid tasks found: $($validTasks.Count)" -ForegroundColor White
     }
     
-    Write-Host "Processing summary:" -ForegroundColor Yellow
-    Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
-    Write-Host "  Valid tasks found: $($validTasks.Count)" -ForegroundColor White
+    # Scan for startup entries if requested
+    if ($StartupFiles -or $StartupRegistry -or $StartupLogonScripts) {
+        Write-Host "`nScanning startup entries..." -ForegroundColor Green
+        
+        if ($StartupFiles) {
+            Write-Host "Scanning startup files..." -ForegroundColor Cyan
+            $startupFiles = Get-StartupFiles
+            Write-Host "Found $($startupFiles.Count) startup files" -ForegroundColor Yellow
+            
+            foreach ($startupFile in $startupFiles) {
+                $startupTask = Convert-StartupEntryToTask -StartupEntry $startupFile
+                if ($startupTask) {
+                    $validTasks += $startupTask
+                }
+            }
+        }
+        
+        if ($StartupRegistry) {
+            Write-Host "Scanning startup registry entries..." -ForegroundColor Cyan
+            $startupRegistry = Get-StartupRegistry
+            Write-Host "Found $($startupRegistry.Count) startup registry entries" -ForegroundColor Yellow
+            
+            foreach ($registryEntry in $startupRegistry) {
+                $startupTask = Convert-StartupEntryToTask -StartupEntry $registryEntry
+                if ($startupTask) {
+                    $validTasks += $startupTask
+                }
+            }
+        }
+        
+        if ($StartupLogonScripts) {
+            Write-Host "Scanning logon scripts..." -ForegroundColor Cyan
+            $logonScripts = Get-StartupLogonScripts
+            Write-Host "Found $($logonScripts.Count) logon scripts" -ForegroundColor Yellow
+            
+            foreach ($logonScript in $logonScripts) {
+                $startupTask = Convert-StartupEntryToTask -StartupEntry $logonScript
+                if ($startupTask) {
+                    $validTasks += $startupTask
+                }
+            }
+        }
+        
+        Write-Host "Total valid tasks after startup scanning: $($validTasks.Count)" -ForegroundColor Yellow
+    }
     
     # Handle merge mode if specified
     $existingData = $null
