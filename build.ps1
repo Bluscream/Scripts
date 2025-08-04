@@ -208,7 +208,8 @@ function Build-DockerImages {
         [string]$projectDir,
         [string]$projectName,
         [string]$newVersion,
-        [string[]]$buildConfigs
+        [string[]]$buildConfigs,
+        [string]$repo
     )
     
     Write-Host "Building Docker images..."
@@ -250,24 +251,24 @@ ENTRYPOINT ["dotnet", "$projectName.dll"]
         foreach ($config in $buildConfigs) {
             $configTag = if ($config -eq "Release") { "release" } else { "debug" }
             
-            # Build Docker image for Docker Hub - use lowercase for Docker compliance
-            $dockerImageName = "$($projectName.ToLower())$configTag"
-            $dockerTag = "${dockerImageName}:$newVersion"
-            $dockerLatestTag = "${dockerImageName}:latest"
+            # Build Docker image using repository name as base
+            $dockerImageName = if ($repo) { $repo.ToLower() } else { $projectName.ToLower() }
+            $dockerTag = "${dockerImageName}:$configTag-$newVersion"
+            $dockerLatestTag = "${dockerImageName}:$configTag-latest"
             
             Write-Host "Building Docker image: $dockerTag"
             docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$config .
             
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Docker image built successfully: $dockerTag"
-                
-                # Tag as latest
-                docker tag $dockerTag $dockerLatestTag
-                Write-Host "Tagged as latest: $dockerLatestTag"
-            }
-            else {
-                Write-Host "Failed to build Docker image: $dockerTag" -ForegroundColor Red
-            }
+                         if ($LASTEXITCODE -eq 0) {
+                 Write-Host "Docker image built successfully: $dockerTag" -ForegroundColor Green
+                 
+                 # Tag as latest
+                 docker tag $dockerTag $dockerLatestTag
+                 Write-Host "Tagged as latest: $dockerLatestTag" -ForegroundColor Green
+             }
+             else {
+                 Write-Host "Failed to build Docker image: $dockerTag" -ForegroundColor Red
+             }
         }
     }
 }
@@ -304,10 +305,13 @@ function Publish-GitHubRelease {
     Write-Host "Creating GitHub release: $releaseTitle"
     gh release create $newVersion --title $releaseTitle --notes $releaseBody --repo $fullRepoName
     
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Failed to create GitHub release" -ForegroundColor Red
-        return $false
-    }
+         if ($LASTEXITCODE -ne 0) {
+         Write-Host "Failed to create GitHub release" -ForegroundColor Red
+         return $false
+     }
+     else {
+         Write-Host "GitHub release created successfully" -ForegroundColor Green
+     }
     
     # Upload assets in parallel - only get files from the main bin directory, not subdirectories
     $assets = Get-ChildItem -Path $outputBinDir -Filter "*.exe" -File
@@ -341,18 +345,18 @@ function Publish-GitHubRelease {
     Write-Host "Waiting for all asset uploads to complete..."
     $results = $uploadJobs | Wait-Job | Receive-Job
     
-    # Report results
-    foreach ($result in $results) {
-        if ($result.ExitCode -eq 0) {
-            Write-Host "Successfully uploaded: $($result.Name)"
-        }
-        else {
-            Write-Host "Failed to upload: $($result.Name)" -ForegroundColor Red
-            if ($result.Output) {
-                Write-Host "  Error: $($result.Output)" -ForegroundColor Red
-            }
-        }
-    }
+         # Report results
+     foreach ($result in $results) {
+         if ($result.ExitCode -eq 0) {
+             Write-Host "Successfully uploaded: $($result.Name)" -ForegroundColor Green
+         }
+         else {
+             Write-Host "Failed to upload: $($result.Name)" -ForegroundColor Red
+             if ($result.Output) {
+                 Write-Host "  Error: $($result.Output)" -ForegroundColor Red
+             }
+         }
+     }
     
     # Clean up jobs
     $uploadJobs | Remove-Job
@@ -387,13 +391,13 @@ function Publish-NuGet {
         Write-Host "Publishing NuGet package: $($nupkg.Name)"
         dotnet nuget push $nupkg.FullName --api-key $NugetApiKey --source https://api.nuget.org/v3/index.json
         
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully published: $($nupkg.Name)"
-        }
-        else {
-            Write-Host "Failed to publish: $($nupkg.Name)" -ForegroundColor Red
-            $success = $false
-        }
+                 if ($LASTEXITCODE -eq 0) {
+             Write-Host "Successfully published: $($nupkg.Name)" -ForegroundColor Green
+         }
+         else {
+             Write-Host "Failed to publish: $($nupkg.Name)" -ForegroundColor Red
+             $success = $false
+         }
     }
     
     return $success
@@ -418,34 +422,29 @@ function Publish-DockerHub {
     $success = $true
     foreach ($config in $buildConfigs) {
         $configTag = if ($config -eq "Release") { "release" } else { "debug" }
-        $localImageName = "$($projectName.ToLower())$configTag"
+        $localImageName = "$($projectName.ToLower())"
         # Use repo name if provided, otherwise fall back to project name
         $imageBaseName = if ($repo) { $repo } else { $projectName.ToLower() }
         $dockerImageName = "$dockerUsername/$imageBaseName"
-        if ($configTag -eq "release") {
-            $dockerTag = "${dockerImageName}:$newVersion"
-            $dockerLatestTag = "${dockerImageName}:latest"
-        } else {
-            $dockerTag = "${dockerImageName}:$newVersion-debug"
-            $dockerLatestTag = "${dockerImageName}:latest-debug"
-        }
+        $dockerTag = "${dockerImageName}:$configTag-$newVersion"
+        $dockerLatestTag = "${dockerImageName}:$configTag-latest"
         
         Write-Host "Tagging local image for Docker Hub: $dockerTag"
-        docker tag "${localImageName}:$newVersion" $dockerTag
-        docker tag "${localImageName}:latest" $dockerLatestTag
+        docker tag "${localImageName}:$configTag-$newVersion" $dockerTag
+        docker tag "${localImageName}:$configTag-latest" $dockerLatestTag
         
         Write-Host "Pushing to Docker Hub: $dockerTag"
         docker push $dockerTag
         Write-Host "Pushing to Docker Hub: $dockerLatestTag"
         docker push $dockerLatestTag
         
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully published to Docker Hub: $dockerImageName"
-        }
-        else {
-            Write-Host "Failed to push to Docker Hub: $dockerImageName" -ForegroundColor Red
-            $success = $false
-        }
+                 if ($LASTEXITCODE -eq 0) {
+             Write-Host "Successfully published to Docker Hub: $dockerImageName" -ForegroundColor Green
+         }
+         else {
+             Write-Host "Failed to push to Docker Hub: $dockerImageName" -ForegroundColor Red
+             $success = $false
+         }
     }
     
     return $success
@@ -472,34 +471,29 @@ function Publish-GHCR {
     $success = $true
     foreach ($config in $buildConfigs) {
         $configTag = if ($config -eq "Release") { "release" } else { "debug" }
-        $localImageName = "$($projectName.ToLower())$configTag"
+        $localImageName = "$($projectName.ToLower())"
         # Use repo name if provided, otherwise fall back to project name
         $imageBaseName = if ($repo) { $repo } else { $projectName.ToLower() }
         $ghcrImageName = "ghcr.io/$githubUsername/$imageBaseName"
-        if ($configTag -eq "release") {
-            $ghcrTag = "${ghcrImageName}:$newVersion"
-            $ghcrLatestTag = "${ghcrImageName}:latest"
-        } else {
-            $ghcrTag = "${ghcrImageName}:$newVersion-debug"
-            $ghcrLatestTag = "${ghcrImageName}:latest-debug"
-        }
+        $ghcrTag = "${ghcrImageName}:$configTag-$newVersion"
+        $ghcrLatestTag = "${ghcrImageName}:$configTag-latest"
         
         Write-Host "Tagging local image for GHCR: $ghcrTag"
-        docker tag "${localImageName}:$newVersion" $ghcrTag
-        docker tag "${localImageName}:latest" $ghcrLatestTag
+        docker tag "${localImageName}:$configTag-$newVersion" $ghcrTag
+        docker tag "${localImageName}:$configTag-latest" $ghcrLatestTag
         
         Write-Host "Pushing to GHCR: $ghcrTag"
         docker push $ghcrTag
         Write-Host "Pushing to GHCR: $ghcrLatestTag"
         docker push $ghcrLatestTag
         
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Successfully published to GHCR: $ghcrImageName"
-        }
-        else {
-            Write-Host "Failed to push to GHCR: $ghcrImageName" -ForegroundColor Red
-            $success = $false
-        }
+                 if ($LASTEXITCODE -eq 0) {
+             Write-Host "Successfully published to GHCR: $ghcrImageName" -ForegroundColor Green
+         }
+         else {
+             Write-Host "Failed to push to GHCR: $ghcrImageName" -ForegroundColor Red
+             $success = $false
+         }
     }
     
     return $success
@@ -668,14 +662,14 @@ function Build-Project {
             dotnet publish -c $config -r $arch 
             $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
             Write-Host "Output DLL: $dllPath"
-            if ($dllPath) {
-                $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
-                Copy-Item $dllPath.FullName $dllDest -Force
-                Write-Host "DLL built successfully: $dllDest"
-            }
-            else {
-                Write-Host "DLL not found after build" -ForegroundColor Red
-            }
+                         if ($dllPath) {
+                 $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
+                 Copy-Item $dllPath.FullName $dllDest -Force
+                 Write-Host "DLL built successfully: $dllDest" -ForegroundColor Green
+             }
+             else {
+                 Write-Host "DLL not found after build" -ForegroundColor Red
+             }
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
             }
@@ -689,10 +683,10 @@ function Build-Project {
             $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
             Write-Host "Output framework EXE: $outputFrameworkExe"
             $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
-            if ($outputFrameworkExe) {
-                Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
-                Write-Host "Framework-dependent EXE built successfully: $fwExeName"
-            }
+                         if ($outputFrameworkExe) {
+                 Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
+                 Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
+             }
             
             Write-Host "Building Self-contained EXE for $config..."
             dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
@@ -702,10 +696,10 @@ function Build-Project {
             $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             Write-Host "Output standalone EXE: $outputStandaloneExe"
             $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
-            if ($outputStandaloneExe) {
-                Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
-                Write-Host "Self-contained EXE built successfully: $scExeName"
-            }
+                         if ($outputStandaloneExe) {
+                 Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
+                 Write-Host "Self-contained EXE built successfully: $scExeName" -ForegroundColor Green
+             }
             
             # For upload, always use the arch-suffixed names
             if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
@@ -722,7 +716,7 @@ function Build-Project {
 
         # Build Docker images if requested
         if ($Docker) {
-            Build-DockerImages -projectDir $projectDir -projectName $projectName -newVersion $newVersion -buildConfigs $buildConfigs
+            Build-DockerImages -projectDir $projectDir -projectName $projectName -newVersion $newVersion -buildConfigs $buildConfigs -repo $Repo
         }
 
         Pop-Location
@@ -802,12 +796,12 @@ function Publish-Project {
         if (-not $ghcrSuccess) { $publishSuccess = $false }
     }
     
-    if ($publishSuccess) {
-        Write-Host "All publishing operations completed successfully!"
-    }
-    else {
-        Write-Host "Some publishing operations failed." -ForegroundColor Yellow
-    }
+         if ($publishSuccess) {
+         Write-Host "All publishing operations completed successfully!" -ForegroundColor Green
+     }
+     else {
+         Write-Host "Some publishing operations failed." -ForegroundColor Yellow
+     }
     
     return $publishSuccess
 }
