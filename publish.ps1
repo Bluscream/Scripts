@@ -6,7 +6,11 @@ param(
     [switch]$Github,
     [string]$Arch,
     [switch]$Git,
-    [string]$Repo
+    [string]$Repo,
+    [switch]$Release,
+    [switch]$Debug,
+    [switch]$Docker,
+    [switch]$Ghcr
 )
 
 $gitignore_template = @"
@@ -133,6 +137,22 @@ foreach ($csproj in $csprojFiles) {
     }
     Write-Host "Using architecture: $arch"
 
+    # Determine build configurations
+    $buildConfigs = @()
+    if ($Release) {
+        $buildConfigs += "Release"
+    }
+    if ($Debug) {
+        $buildConfigs += "Debug"
+    }
+    
+    # Default to both Release and Debug if no configuration specified
+    if ($buildConfigs.Count -eq 0) {
+        $buildConfigs = @("Release", "Debug")
+    }
+    
+    Write-Host "Build configurations: $($buildConfigs -join ', ')"
+
     $outputFrameworkSuffix = ".$projectFramework.$arch.exe"
     $outputSelfcontainedSuffix = ".standalone.$arch.exe"
     $outputBinarySuffix = ".$arch"
@@ -213,56 +233,67 @@ foreach ($csproj in $csprojFiles) {
     if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
 
     $outputFrameworkExe = $null; $outputStandaloneExe = $null; $outputBinPath = $null
-    Write-Host "Building DLL..."
-    dotnet publish -c Release -r $arch 
-    $dllPath = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
-    Write-Host "Output DLL: $dllPath"
-    if ($dllPath) {
-        $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffix.dll"
-        Copy-Item $dllPath.FullName $dllDest -Force
-        Write-Host "DLL built successfully: $dllDest"
-    }
-    else {
-        Write-Host "DLL not found after build" -ForegroundColor Red
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-    }
-    $outputBinPath = $null
-    if (Test-Path (Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix")) {
-        $outputBinPath = Join-Path $outputBinDir "$outputAssemblyName.$outputBinarySuffix"
-    }
-    Write-Host "Building Framework-dependent EXE..."
-    # Framework-dependent build
-    dotnet publish -c Release -r $arch --self-contained false
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-    }
-    $outputFrameworkExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
-    Write-Host "Output framework EXE: $outputFrameworkExe"
-    $fwExeName = "$outputAssemblyName$outputFrameworkSuffix"
-    if ($outputFrameworkExe) {
-        Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
-        Write-Host "Framework-dependent EXE built successfully: $fwExeName"
-    }
-    Write-Host "Building Self-contained EXE..."
-    dotnet publish -c Release -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-    }
-    $outputStandaloneExe = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    Write-Host "Output standalone EXE: $outputStandaloneExe"
-    $scExeName = "$outputAssemblyName$outputSelfcontainedSuffix"
-    if ($outputStandaloneExe) {
-        Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
-        Write-Host "Self-contained EXE built successfully: $scExeName"
-    }
-    # For upload, always use the arch-suffixed names
-    if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
-        $outputBinPath = Join-Path $outputBinDir $fwExeName
-    }
-    elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
-        $outputBinPath = Join-Path $outputBinDir $scExeName
+    
+    # Build for each configuration
+    foreach ($config in $buildConfigs) {
+        Write-Host "Building for configuration: $config"
+        
+        # Determine suffix based on configuration
+        $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
+        $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
+        $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
+        $outputBinarySuffixWithConfig = ".$arch$configSuffix"
+        
+        Write-Host "Building DLL for $config..."
+        dotnet publish -c $config -r $arch 
+        $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
+        Write-Host "Output DLL: $dllPath"
+        if ($dllPath) {
+            $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
+            Copy-Item $dllPath.FullName $dllDest -Force
+            Write-Host "DLL built successfully: $dllDest"
+        }
+        else {
+            Write-Host "DLL not found after build" -ForegroundColor Red
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+        }
+        
+        Write-Host "Building Framework-dependent EXE for $config..."
+        # Framework-dependent build
+        dotnet publish -c $config -r $arch --self-contained false
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+        }
+        $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+        Write-Host "Output framework EXE: $outputFrameworkExe"
+        $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
+        if ($outputFrameworkExe) {
+            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
+            Write-Host "Framework-dependent EXE built successfully: $fwExeName"
+        }
+        
+        Write-Host "Building Self-contained EXE for $config..."
+        dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+        }
+        $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Write-Host "Output standalone EXE: $outputStandaloneExe"
+        $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
+        if ($outputStandaloneExe) {
+            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
+            Write-Host "Self-contained EXE built successfully: $scExeName"
+        }
+        
+        # For upload, always use the arch-suffixed names
+        if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
+            $outputBinPath = Join-Path $outputBinDir $fwExeName
+        }
+        elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
+            $outputBinPath = Join-Path $outputBinDir $scExeName
+        }
     }
 
     function Create-GitHubRepo {
@@ -357,6 +388,131 @@ foreach ($csproj in $csprojFiles) {
         $packageUrl = "https://www.nuget.org/packages/$projectName/$oldVersion/Manage"
         Write-Host "Opening NuGet package management page for version $oldVersion..."
         Start-Process $packageUrl
+    }
+
+    # Docker and GHCR publishing
+    if ($Docker -or $Ghcr) {
+        Write-Host "Processing Docker builds and publishing..."
+        
+        # Get usernames from environment variables
+        $dockerUsername = if ($env:DOCKER_USERNAME) { $env:DOCKER_USERNAME } else { $env:USERNAME }
+        $githubUsername = if ($env:GITHUB_USERNAME) { $env:GITHUB_USERNAME } else { $env:USERNAME }
+        
+        if ($Docker -and (-not $dockerUsername)) {
+            Write-Error "DOCKER_USERNAME environment variable is required for Docker publishing."
+            Pop-Location
+            exit 1
+        }
+        
+        if ($Ghcr -and (-not $githubUsername)) {
+            Write-Error "GITHUB_USERNAME environment variable is required for GHCR publishing."
+            Pop-Location
+            exit 1
+        }
+        
+        # Find Dockerfile(s)
+        $dockerfiles = Get-ChildItem -Path $projectDir -Filter "Dockerfile*" -Recurse -ErrorAction SilentlyContinue
+        if ($dockerfiles.Count -eq 0) {
+            Write-Host "No Dockerfile found in $projectDir. Creating a default Dockerfile..."
+            $dockerfileContent = @"
+FROM mcr.microsoft.com/dotnet/runtime:8.0 AS base
+WORKDIR /app
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY ["$projectName.csproj", "./"]
+RUN dotnet restore "$projectName.csproj"
+COPY . .
+WORKDIR "/src"
+RUN dotnet build "$projectName.csproj" -c Release -o /app/build
+
+FROM build AS publish
+RUN dotnet publish "$projectName.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "$projectName.dll"]
+"@
+            $dockerfilePath = Join-Path $projectDir "Dockerfile"
+            $dockerfileContent | Out-File -FilePath $dockerfilePath -Encoding UTF8
+            $dockerfiles = @(Get-Item $dockerfilePath)
+            Write-Host "Created default Dockerfile at $dockerfilePath"
+        }
+        
+        foreach ($dockerfile in $dockerfiles) {
+            Write-Host "Processing Dockerfile: $($dockerfile.FullName)"
+            
+            # Build for each configuration
+            foreach ($config in $buildConfigs) {
+                $configLower = $config.ToLower()
+                $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
+                
+                # Docker Hub publishing
+                if ($Docker) {
+                    Write-Host "Building and publishing to Docker Hub for $config configuration..."
+                    
+                    # Build Docker image
+                    $dockerImageName = "$dockerUsername/$projectName$configSuffix"
+                    $dockerTag = "${dockerImageName}:$newVersion"
+                    $dockerLatestTag = "${dockerImageName}:latest"
+                    
+                    Write-Host "Building Docker image: $dockerTag"
+                    docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$config .
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "Docker image built successfully: $dockerTag"
+                        
+                        # Tag as latest
+                        docker tag $dockerTag $dockerLatestTag
+                        
+                        # Push to Docker Hub
+                        Write-Host "Pushing to Docker Hub: $dockerTag"
+                        docker push $dockerTag
+                        
+                        Write-Host "Pushing to Docker Hub: $dockerLatestTag"
+                        docker push $dockerLatestTag
+                        
+                        Write-Host "Successfully published to Docker Hub: $dockerImageName"
+                    }
+                    else {
+                        Write-Host "Failed to build Docker image for $config configuration" -ForegroundColor Red
+                    }
+                }
+                
+                # GitHub Container Registry publishing
+                if ($Ghcr) {
+                    Write-Host "Building and publishing to GHCR for $config configuration..."
+                    
+                    # Build Docker image for GHCR
+                    $ghcrImageName = "ghcr.io/$githubUsername/$projectName$configSuffix"
+                    $ghcrTag = "${ghcrImageName}:$newVersion"
+                    $ghcrLatestTag = "${ghcrImageName}:latest"
+                    
+                    Write-Host "Building Docker image for GHCR: $ghcrTag"
+                    docker build -f $dockerfile.FullName -t $ghcrTag --build-arg CONFIGURATION=$config .
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "Docker image built successfully for GHCR: $ghcrTag"
+                        
+                        # Tag as latest
+                        docker tag $ghcrTag $ghcrLatestTag
+                        
+                        # Push to GHCR
+                        Write-Host "Pushing to GHCR: $ghcrTag"
+                        docker push $ghcrTag
+                        
+                        Write-Host "Pushing to GHCR: $ghcrLatestTag"
+                        docker push $ghcrLatestTag
+                        
+                        Write-Host "Successfully published to GHCR: $ghcrImageName"
+                    }
+                    else {
+                        Write-Host "Failed to build Docker image for GHCR $config configuration" -ForegroundColor Red
+                    }
+                }
+            }
+        }
     }
 
     Pop-Location
