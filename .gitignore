@@ -55,5 +55,4 @@ RestartOnCrash/settings.ini
 
 player.exe
 yt-dlp.exe
-5E31.tmp
-C621.tmp
+*.tmp
