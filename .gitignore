@@ -52,3 +52,8 @@ unraid\config\plugins\user.scripts\scripts\sort-apks\tools
 Remove-EdgeWeb.exe
 restart-on-crash.ini
 RestartOnCrash/settings.ini
+
+player.exe
+yt-dlp.exe
+5E31.tmp
+C621.tmp

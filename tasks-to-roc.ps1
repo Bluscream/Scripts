@@ -23,8 +23,8 @@
      If not specified, no scheduled tasks will be processed.
      Note: This parameter is required to process any startup-related items.
      
- .PARAMETER DisableTasks
-     Stop and disable the scheduled tasks after successful conversion (requires administrator privileges).
+ .PARAMETER Disable
+     Stop and disable scheduled tasks and move startup files to AutorunsDisabled\ subfolder after successful conversion (requires administrator privileges).
      
  .PARAMETER Merge
      Merge new entries into existing INI file, only adding entries where FileName doesn't already exist.
@@ -55,10 +55,10 @@
      .\tasks-to-roc.ps1 -StartupTasks -OutputPath "C:\temp\startup-tasks.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -StartupTasks -DisableTasks -OutputPath "C:\temp\startup-tasks-disabled.ini"
+     .\tasks-to-roc.ps1 -StartupTasks -Disable -OutputPath "C:\temp\startup-tasks-disabled.ini"
      
  .EXAMPLE
-     .\tasks-to-roc.ps1 -DisableTasks -OutputPath "C:\temp\restart-on-crash.ini"
+     .\tasks-to-roc.ps1 -Disable -OutputPath "C:\temp\restart-on-crash.ini"
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -Merge -OutputPath "C:\temp\existing-config.ini"
@@ -79,10 +79,10 @@
 param(
     [string]$OutputPath = ".\restart-on-crash.ini",
     [switch]$NoElevate,
-    [switch]$DisableTasks,
+    [switch]$Disable,
     [switch]$Merge,
     [switch]$WriteExtra,
-    [string[]]$Ignore = @(),
+    [string[]]$Ignore = @("RestartOnCrash"),
     [switch]$Tasks,
     [switch]$Files,
     [switch]$Registry,
@@ -133,8 +133,7 @@ $Script:AppOverrides = @{
 
 # Self-elevation logic
 if (-not $NoElevate -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    $elevationReason = if ($DisableTasks) { "disable scheduled tasks" } else { "access all scheduled tasks" }
-    Write-Host "This script requires administrator privileges to $elevationReason." -ForegroundColor Yellow
+    Write-Host "This script requires administrator privileges." -ForegroundColor Yellow
     Write-Host "Attempting to elevate privileges..." -ForegroundColor Yellow
     
     try {
@@ -301,6 +300,8 @@ class ApplicationEntry {
     [int]$DelayEnabled
     [int]$CrashDelay
     [string]$Triggers
+    [int]$FileNameExists
+    [int]$CommandExists
     
     ApplicationEntry() {
         $this.FileName = ""
@@ -316,6 +317,8 @@ class ApplicationEntry {
         $this.DelayEnabled = 1
         $this.CrashDelay = 60
         $this.Triggers = ""
+        $this.FileNameExists = 0
+        $this.CommandExists = 0
     }
     
     ApplicationEntry([hashtable]$settings, [hashtable]$defaults) {
@@ -334,6 +337,8 @@ class ApplicationEntry {
         $this.DelayEnabled = $settings.DelayEnabled ?? $defaults.DelayEnabled
         $this.CrashDelay = $settings.CrashDelay ?? $defaults.CrashDelay
         $this.Triggers = $settings.Triggers ?? $defaults.Triggers
+        $this.FileNameExists = $settings.FileNameExists ?? 0
+        $this.CommandExists = $settings.CommandExists ?? 0
     }
     
     [hashtable]ToHashtable() {
@@ -351,6 +356,8 @@ class ApplicationEntry {
             DelayEnabled         = $this.DelayEnabled
             CrashDelay           = $this.CrashDelay
             Triggers             = $this.Triggers
+            FileNameExists       = $this.FileNameExists
+            CommandExists        = $this.CommandExists
         }
     }
     
@@ -367,6 +374,45 @@ class ApplicationEntry {
             $triggerArray = $this.Triggers -split ','
             $uniqueTriggers = $triggerArray | Sort-Object -Unique
             $this.Triggers = $uniqueTriggers -join ','
+        }
+    }
+    
+    [void]Update() {
+        # Check if FileName exists
+        if (-not [string]::IsNullOrWhiteSpace($this.FileName)) {
+            try {
+                # Try to resolve the file path
+                $resolvedPath = [System.IO.Path]::GetFullPath($this.FileName)
+                $this.FileNameExists = if (Test-Path $resolvedPath -PathType Leaf) { 1 } else { 0 }
+            }
+            catch {
+                $this.FileNameExists = 0
+            }
+        }
+        else {
+            $this.FileNameExists = 0
+        }
+        
+        # Check if Command executable exists
+        if (-not [string]::IsNullOrWhiteSpace($this.Command)) {
+            try {
+                # Extract the executable path from the command
+                $commandParts = $this.Command -split '\s+', 2
+                $executablePath = $commandParts[0]
+                
+                # Remove quotes if present
+                $executablePath = $executablePath -replace '^["'']|["'']$', ''
+                
+                # Try to resolve the executable path
+                $resolvedPath = [System.IO.Path]::GetFullPath($executablePath)
+                $this.CommandExists = if (Test-Path $resolvedPath -PathType Leaf) { 1 } else { 0 }
+            }
+            catch {
+                $this.CommandExists = 0
+            }
+        }
+        else {
+            $this.CommandExists = 0
         }
     }
     
@@ -420,7 +466,12 @@ function Get-ExecutablePathAndArgsFromXml {
                 
                 # Get arguments if present in XML (this takes precedence)
                 if ($taskArgs) {
-                    $arguments += $taskArgs
+                    if ($arguments) {
+                        $arguments += " " + $taskArgs
+                    }
+                    else {
+                        $arguments = $taskArgs
+                    }
                 }
                 
                 $executables += [Executable]::new($executablePath, $arguments)
@@ -438,7 +489,12 @@ function Get-ExecutablePathAndArgsFromXml {
             
             # Get arguments if present in XML (this takes precedence)
             if ($taskArgs) {
-                $arguments += $taskArgs
+                if ($arguments) {
+                    $arguments += " " + $taskArgs
+                }
+                else {
+                    $arguments = $taskArgs
+                }
             }
             
             $executables += [Executable]::new($executablePath, $arguments)
@@ -546,6 +602,28 @@ function Test-TaskShouldBeIgnored {
     # Check if task path matches any ignore pattern
     foreach ($pattern in $IgnorePatterns) {
         if ($TaskPath -like $pattern) {
+            return $true
+        }
+    }
+    
+    return $false
+}
+
+# Function to check if item should be ignored based on patterns
+function Test-ItemShouldBeIgnored {
+    param(
+        [string]$ItemName,
+        [string[]]$IgnorePatterns
+    )
+    
+    # If no ignore patterns specified, don't ignore anything
+    if ($IgnorePatterns.Count -eq 0) {
+        return $false
+    }
+    
+    # Check if item name matches any ignore pattern (case-insensitive)
+    foreach ($pattern in $IgnorePatterns) {
+        if ($ItemName -like "*$pattern*") {
             return $true
         }
     }
@@ -853,6 +931,12 @@ function Parse-CommandLine {
     
     Write-Verbose "Parsed path: '$path', arguments: $($arguments -join ' ')"
     
+    # Check if path is empty after parsing
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Write-Verbose "Path is empty after parsing, throwing error"
+        throw "Failed to parse executable path from command line: '$CommandLine'"
+    }
+    
     # Simple approach: split by space and check if first part is already a valid path
     # If not, keep adding parts until we find a valid path
     $originalPath = $path
@@ -979,6 +1063,13 @@ function Parse-CommandLine {
     
     # Now get the final Get-Item object for the resolved path
     $expandedPath = [Environment]::ExpandEnvironmentVariables($path)
+    
+    # Final safety check to ensure we don't pass empty path to Get-Item
+    if ([string]::IsNullOrWhiteSpace($expandedPath)) {
+        Write-Verbose "Expanded path is empty, throwing error"
+        throw "Failed to resolve executable path from command line: '$CommandLine'"
+    }
+    
     try {
         $pathItem = Get-Item -Path $expandedPath -ErrorAction Stop
         Write-Host "Successfully parsed $($pathItem.PSIsContainer ? 'directory' : 'file'): $($pathItem.FullName) $($arguments -join ' ')" -ForegroundColor Green
@@ -989,6 +1080,12 @@ function Parse-CommandLine {
         
         # Try to find the executable in the system PATH
         try {
+            # Check if path is empty before calling Get-Command
+            if ([string]::IsNullOrWhiteSpace($path)) {
+                Write-Verbose "Path is empty, cannot search in PATH"
+                throw "Path is empty"
+            }
+            
             $commandInfo = Get-Command -Name $path -ErrorAction Stop
             Write-Host "Found executable in PATH: $($commandInfo.Source) $($arguments -join ' ')" -ForegroundColor Green
             return (Get-Item -Path $commandInfo.Source), $arguments
@@ -996,6 +1093,10 @@ function Parse-CommandLine {
         catch {
             Write-Verbose "Failed to find executable in PATH: $path"
             # Return the expanded path as string if both Get-Item and Get-Command fail
+            if ([string]::IsNullOrWhiteSpace($expandedPath)) {
+                Write-Verbose "Expanded path is empty, throwing error"
+                throw "Failed to resolve executable path from command line: '$CommandLine'"
+            }
             return ($expandedPath, $arguments)
         }
     }
@@ -1106,12 +1207,6 @@ function Process-TaskXmlFileToApplicationEntry {
         $primaryExecutable = $executables[0]
         $executablePath = $primaryExecutable.Path
         $arguments = $primaryExecutable.Arguments
-        
-        # Skip RestartOnCrash.exe to prevent processing itself (case insensitive)
-        if ($executablePath -ilike "*RestartOnCrash.exe*") {
-            Write-Verbose "Skipping RestartOnCrash.exe: $taskPath\$($XmlFile.Name) -> $executablePath"
-            return $null
-        }
         
         # Verify executable exists
         if (-not [System.IO.File]::Exists($executablePath)) { 
@@ -1380,6 +1475,10 @@ function Write-IniContent {
     # Write application sections
     for ($i = 0; $i -lt $Applications.Count; $i++) {
         $app = $Applications[$i]
+        
+        # Update existence information before writing
+        $app.Update()
+        
         $content += "[Application$i]"
         
         # Convert ApplicationEntry to hashtable for processing
@@ -1398,40 +1497,6 @@ function Write-IniContent {
     
     # Write to file
     $content | Out-File -FilePath $FilePath -Encoding UTF8
-}
-
-# Function to scan startup files from common locations
-function Get-StartupFiles {
-    [CmdletBinding()]
-    param()
-    
-    $Files = @()
-    
-    # Common startup locations
-    $startupPaths = @(
-        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
-        "$env:PROGRAMDATA\Microsoft\Windows\Start Menu\Programs\Startup",
-        "$env:USERPROFILE\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-    )
-    
-    foreach ($path in $startupPaths) {
-        if (Test-Path $path) {
-            $files = Get-ChildItem -Path $path -File -ErrorAction SilentlyContinue | Where-Object {
-                $_.Extension -match '\.(exe|bat|cmd|vbs|ps1)$'
-            }
-            
-            foreach ($file in $files) {
-                $Files += [PSCustomObject]@{
-                    Path   = $file.FullName
-                    Name   = $file.Name
-                    Type   = "StartupFile"
-                    Source = $path
-                }
-            }
-        }
-    }
-    
-    return $Files
 }
 
 # Function to scan startup registry entries
@@ -1583,12 +1648,6 @@ function Convert-StartupEntryToApplicationEntry {
             return $null
         }
         
-        # Skip RestartOnCrash.exe
-        if ($executablePath -ilike "*RestartOnCrash.exe*") {
-            Write-Verbose "Skipping RestartOnCrash.exe: $executablePath"
-            return $null
-        }
-        
         # Create application entry using ApplicationEntry::new() with default settings
         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         
@@ -1634,7 +1693,7 @@ function Load-StartupTasks {
         Scans scheduled tasks that are triggered on Boot or Logon and are enabled.
         Also scans startup files, registry entries, and logon scripts if specified.
         This function forces -Triggers Boot,Logon and -EnabledOnly parameters internally.
-        If -DisableTasks is specified, tasks are disabled directly during loading.
+        If -Disable is specified, tasks are disabled directly during loading.
     .OUTPUTS
         [ApplicationEntry[]]
     #>
@@ -1672,7 +1731,7 @@ function Load-StartupTasks {
         Write-Host "Filtering tasks to only include triggers: $($forcedTriggers -join ', ')" -ForegroundColor Cyan
         Write-Host "Filtering tasks to only include enabled tasks" -ForegroundColor Cyan
         
-        if ($DisableTasks) {
+        if ($Disable) {
             Write-Host "WARNING: Tasks will be stopped and disabled after successful conversion!" -ForegroundColor Red
             Write-Host "This action cannot be undone automatically. Use with caution." -ForegroundColor Red
         }
@@ -1729,9 +1788,6 @@ function Load-StartupTasks {
                 $executablePath = $primaryExecutable.Path
                 $arguments = $primaryExecutable.Arguments
             
-                # Skip RestartOnCrash.exe
-                if ($executablePath -ilike "*RestartOnCrash.exe*") { continue }
-            
                 # Verify executable exists
                 if (-not [System.IO.File]::Exists($executablePath)) { continue }
             
@@ -1785,7 +1841,7 @@ function Load-StartupTasks {
                 $validApplications += $app
             
                 # Disable task if requested
-                if ($DisableTasks) {
+                if ($Disable) {
                     $taskName = $xmlFile.Name
                     if (Disable-SingleScheduledTask -TaskName $taskName -TaskPath $taskPath) {
                         $disabledCount++
@@ -1804,7 +1860,7 @@ function Load-StartupTasks {
         Write-Host "  Total task files processed: $processedCount" -ForegroundColor White
         Write-Host "  Valid startup applications found: $($validApplications.Count)" -ForegroundColor White
     
-        if ($DisableTasks) {
+        if ($Disable) {
             Write-Host "  Tasks successfully disabled: $disabledCount" -ForegroundColor Green
             Write-Host "  Tasks failed to disable: $failedDisableCount" -ForegroundColor Red
         }
@@ -1813,7 +1869,7 @@ function Load-StartupTasks {
     return $validApplications
 }
 
-function Load-StartupScripts {
+function Load-StartupScriptsFiles {
     <#
     .SYNOPSIS
         Returns a list of ApplicationEntry objects for all scripts set to run at user logon via Group Policy (Logon Scripts).
@@ -1823,6 +1879,16 @@ function Load-StartupScripts {
         [ApplicationEntry[]]
     #>
     Write-Host "Loading startup scripts..." -ForegroundColor Blue
+    
+    # Initialize counters for disable mode
+    $disabledCount = 0
+    $failedDisableCount = 0
+    
+    if ($Disable) {
+        Write-Host "WARNING: Startup scripts will be moved to AutorunsDisabled\ subfolder after successful conversion!" -ForegroundColor Red
+        Write-Host "This action cannot be undone automatically. Use with caution." -ForegroundColor Red
+    }
+    
     $entries = @()
 
     # Common locations for logon scripts
@@ -1834,6 +1900,7 @@ function Load-StartupScripts {
     foreach ($dir in $scriptDirs) {
         if (Test-Path $dir) {
             $iniPath = Join-Path $dir "scripts.ini"
+            Write-Verbose "[Load-StartupScriptsFiles] Processing $($iniPath)"
             if (Test-Path $iniPath) {
                 # Parse scripts.ini for script file names
                 $lines = Get-Content $iniPath
@@ -1842,16 +1909,31 @@ function Load-StartupScripts {
                         $scriptFile = $matches[1].Trim()
                         $scriptPath = Join-Path $dir $scriptFile
                         if (Test-Path $scriptPath) {
+                            # Check if script should be ignored
+                            if (Test-ItemShouldBeIgnored -ItemName $scriptFile -IgnorePatterns $Ignore) {
+                                Write-Warning "[Load-StartupScriptsFiles] Ignoring script due to pattern match: $scriptFile"
+                                continue
+                            }
                             $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                             $entry.FileName = $scriptPath
                             # Use Parse-CommandLine for robust command line handling
-                            Write-Verbose "[Load-StartupScripts] Will try to parse command line for Script $($scriptPath)"
+                            Write-Verbose "[Load-StartupScriptsFiles] Will try to parse command line for Script $($scriptPath)"
                             $parsedCommand = Parse-CommandLine -CommandLine $scriptPath
                             $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
                             $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
                             $entry.WorkingDirectory = Format-PathWithQuotes -Path ([System.IO.Path]::GetDirectoryName($scriptPath)) -QuoteType Auto
                             $entry.Triggers = "Logon"
                             $entries += $entry
+                            
+                            # Disable startup script if requested
+                            if ($Disable) {
+                                if (Disable-SingleStartupFile -FilePath $scriptPath) {
+                                    $disabledCount++
+                                }
+                                else {
+                                    $failedDisableCount++
+                                }
+                            }
                         }
                     }
                 }
@@ -1859,6 +1941,12 @@ function Load-StartupScripts {
             # Also enumerate all .bat, .cmd, .ps1, .vbs files in the directory
             $scriptFiles = Get-ChildItem -Path $dir -File -Include *.bat, *.cmd, *.ps1, *.vbs -ErrorAction SilentlyContinue
             foreach ($file in $scriptFiles) {
+                # Check if script should be ignored
+                if (Test-ItemShouldBeIgnored -ItemName $file.Name -IgnorePatterns $Ignore) {
+                    Write-Warning "[Load-StartupScriptsFiles] Ignoring script due to pattern match: $($file.Name)"
+                    continue
+                }
+                
                 $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                 $entry.FileName = $file.FullName
                 # Use Parse-CommandLine for robust command line handling
@@ -1869,10 +1957,26 @@ function Load-StartupScripts {
                 $entry.WorkingDirectory = Format-PathWithQuotes -Path $file.DirectoryName -QuoteType Auto
                 $entry.Triggers = if ($dir -like "*Startup") { "Boot" } else { "Logon" }
                 $entries += $entry
+                
+                # Disable startup script if requested
+                if ($Disable) {
+                    if (Disable-SingleStartupFile -FilePath $file.FullName) {
+                        $disabledCount++
+                    }
+                    else {
+                        $failedDisableCount++
+                    }
+                }
             }
         }
     }
     Write-Host "Loaded $($entries.Count) startup scripts" -ForegroundColor Green
+    
+    if ($Disable) {
+        Write-Host "  Startup scripts successfully disabled: $disabledCount" -ForegroundColor Green
+        Write-Host "  Startup scripts failed to disable: $failedDisableCount" -ForegroundColor Red
+    }
+    
     return $entries
 }
 function Load-StartupRegistry {
@@ -1899,6 +2003,12 @@ function Load-StartupRegistry {
             foreach ($property in $values.PSObject.Properties) {
                 $name = $property.Name
                 $commandLine = $property.Value
+                
+                # Check if registry entry should be ignored
+                if (Test-ItemShouldBeIgnored -ItemName $name -IgnorePatterns $Ignore) {
+                    Write-Warning "[Load-StartupRegistry] Ignoring registry entry due to pattern match: $name"
+                    continue
+                }
 
                 # Try to extract the executable path and arguments using our helper function
                 try {
@@ -1941,18 +2051,39 @@ function Load-StartupFiles {
         [ApplicationEntry[]]
     #>
     Write-Host "Loading startup files..." -ForegroundColor Blue
+    
+    # Initialize counters for disable mode
+    $disabledCount = 0
+    $failedDisableCount = 0
+    
+    if ($Disable) {
+        Write-Host "WARNING: Startup files will be moved to AutorunsDisabled\ subfolder after successful conversion!" -ForegroundColor Red
+        Write-Host "This action cannot be undone automatically. Use with caution." -ForegroundColor Red
+    }
+    
     $startupFolders = @(
         [Environment]::GetFolderPath("Startup"),
         [Environment]::GetFolderPath("CommonStartup")
     ) | Where-Object { $_ -and (Test-Path $_) }
 
-    $Files = @()
+    $f = @()
     foreach ($folder in $startupFolders) {
-        $Files += Get-ChildItem -Path $folder -File -Include *.* -ErrorAction SilentlyContinue
+        Write-Verbose "[Load-StartupFiles] Processing $($folder)"
+        $folderFiles = Get-ChildItem -Path $folder -File -ErrorAction SilentlyContinue
+        Write-Verbose "[Load-StartupFiles] Found $($folderFiles.Count) files in $($folder)"
+        $f += $folderFiles
     }
 
     $entries = @()
-    foreach ($file in $Files) {
+    foreach ($file in $f) {
+        Write-Verbose "[Load-StartupFiles] Processing $($file.FullName)"
+        
+        # Check if file should be ignored
+        if (Test-ItemShouldBeIgnored -ItemName $file.Name -IgnorePatterns $Ignore) {
+            Write-Warning "[Load-StartupFiles] Ignoring file due to pattern match: $($file.Name)"
+            continue
+        }
+        
         $targetPath = $null
         $arguments = ""
         $workingDir = ""
@@ -1971,6 +2102,7 @@ function Load-StartupFiles {
         }
 
         if (-not $targetPath -or -not (Test-Path $targetPath)) {
+            Write-Verbose "[Load-StartupFiles] Skipping $($file.FullName) - target path not found"
             continue
         }
 
@@ -1978,20 +2110,310 @@ function Load-StartupFiles {
         $entry.FileName = $targetPath
         # Use Parse-CommandLine for robust command line handling
         $commandLine = if ($arguments) { "$targetPath $arguments" } else { $targetPath }
-        Write-Verbose "Will try to parse command line for Startup File $($file.FullName)"
+        Write-Verbose "[Load-StartupFiles] Will try to parse command line for Startup File $($file.FullName)"
         $parsedCommand = Parse-CommandLine -CommandLine $commandLine
         $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
         $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
         if ($parsedCommand[1].Count -gt 0) {
             $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
         }
+        # Ensure working directory is not empty before formatting
+        if ([string]::IsNullOrWhiteSpace($workingDir)) {
+            $workingDir = [System.IO.Path]::GetDirectoryName($targetPath)
+        }
         $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDir -QuoteType Auto
         $entry.Triggers = "Logon"
         $entries += $entry
+        
+        # Disable startup file if requested
+        if ($Disable) {
+            if (Disable-SingleStartupFile -FilePath $file.FullName) {
+                $disabledCount++
+            }
+            else {
+                $failedDisableCount++
+            }
+        }
     }
+    
     Write-Host "Loaded $($entries.Count) startup files" -ForegroundColor Green
+    
+    if ($Disable) {
+        Write-Host "  Startup files successfully disabled: $disabledCount" -ForegroundColor Green
+        Write-Host "  Startup files failed to disable: $failedDisableCount" -ForegroundColor Red
+    }
+    
     return $entries
 }
+
+# Function to load startup scripts from Group Policy registry
+function Load-StartupScriptsRegistry {
+    <#
+    .SYNOPSIS
+        Returns a list of ApplicationEntry objects for Group Policy startup scripts found in the registry.
+    .DESCRIPTION
+        Scans the Group Policy Scripts registry keys for startup scripts and returns a list of ApplicationEntry objects.
+    .OUTPUTS
+        [ApplicationEntry[]]
+    #>
+    Write-Host "Loading Group Policy startup scripts from registry..." -ForegroundColor Blue
+    
+    $entries = @()
+    
+    # Define registry paths to scan for Group Policy scripts
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Logon",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Logon"
+    )
+    
+    foreach ($registryPath in $registryPaths) {
+        if (Test-Path $registryPath) {
+            Write-Verbose "[Load-StartupScriptsRegistry] Processing registry path: $registryPath"
+            
+            # Get all subkeys (GPO entries)
+            $gpoKeys = Get-ChildItem -Path $registryPath -ErrorAction SilentlyContinue
+            
+            foreach ($gpoKey in $gpoKeys) {
+                Write-Verbose "[Load-StartupScriptsRegistry] Processing GPO key: $($gpoKey.Name)"
+                
+                # Get script entries within this GPO
+                $scriptKeys = Get-ChildItem -Path $gpoKey.PSPath -ErrorAction SilentlyContinue
+                
+                foreach ($scriptKey in $scriptKeys) {
+                    Write-Verbose "[Load-StartupScriptsRegistry] Processing script key: $($scriptKey.Name)"
+                    
+                    try {
+                        # Get script properties using a safer approach
+                        Write-Verbose "[Load-StartupScriptsRegistry] Getting properties for: $($scriptKey.PSPath)"
+                        
+                        # Use Get-Item to get the registry key, then access properties individually
+                        $regKey = Get-Item -Path $scriptKey.PSPath -ErrorAction SilentlyContinue
+                        if (-not $regKey) {
+                            Write-Verbose "[Load-StartupScriptsRegistry] Could not get registry key"
+                            continue
+                        }
+                        
+                        # Get individual properties safely
+                        $scriptPath = $regKey.GetValue("Script", $null)
+                        $parameters = $regKey.GetValue("Parameters", $null)
+                        $isPowershellValue = $regKey.GetValue("IsPowershell", $null)
+                        
+                        Write-Verbose "[Load-StartupScriptsRegistry] Script: $scriptPath"
+                        Write-Verbose "[Load-StartupScriptsRegistry] Parameters: $parameters"
+                        Write-Verbose "[Load-StartupScriptsRegistry] IsPowershell raw value: $isPowershellValue"
+                        
+                        if (-not $scriptPath) {
+                            Write-Verbose "[Load-StartupScriptsRegistry] No script path found"
+                            continue
+                        }
+                        
+                        # Check if script should be ignored
+                        $scriptFileName = [System.IO.Path]::GetFileName($scriptPath)
+                        if (Test-ItemShouldBeIgnored -ItemName $scriptFileName -IgnorePatterns $Ignore) {
+                            Write-Warning "[Load-StartupScriptsRegistry] Ignoring script due to pattern match: $scriptFileName"
+                            continue
+                        }
+                        
+                        # Handle IsPowershell property which might be stored as binary or DWORD
+                        $isPowershell = $false
+                        if ($isPowershellValue -ne $null) {
+                            Write-Verbose "[Load-StartupScriptsRegistry] IsPowershell type: $($isPowershellValue.GetType().Name)"
+                            Write-Verbose "[Load-StartupScriptsRegistry] IsPowershell value: $isPowershellValue"
+                            
+                            if ($isPowershellValue -is [byte[]]) {
+                                # Convert binary array to boolean (first byte should be 1 for true)
+                                $isPowershell = $isPowershellValue[0] -eq 1
+                            }
+                            else {
+                                # Try to convert to boolean/int
+                                $isPowershell = [bool]$isPowershellValue
+                            }
+                        }
+                        Write-Verbose "[Load-StartupScriptsRegistry] Final IsPowershell: $isPowershell"
+                            
+                        Write-Verbose "[Load-StartupScriptsRegistry] Found script: $scriptPath"
+                        Write-Verbose "[Load-StartupScriptsRegistry] Parameters: $parameters"
+                        Write-Verbose "[Load-StartupScriptsRegistry] IsPowerShell: $isPowershell"
+                            
+                        # Skip if script path is empty or doesn't exist
+                        if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $scriptPath)) {
+                            Write-Verbose "[Load-StartupScriptsRegistry] Skipping $scriptPath - path not found"
+                            continue
+                        }
+                            
+                        # Determine the executable based on script type
+                        if ($isPowershell) {
+                            $executablePath = "powershell.exe"
+                            $commandLine = "powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`""
+                            if ($parameters) {
+                                $commandLine += " $parameters"
+                            }
+                        }
+                        else {
+                            # For batch files or other scripts, use the script path directly
+                            $executablePath = $scriptPath
+                            $commandLine = $scriptPath
+                            if ($parameters) {
+                                $commandLine += " $parameters"
+                            }
+                        }
+                            
+                        # Create ApplicationEntry
+                        $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
+                        $entry.FileName = $executablePath
+                            
+                        # Parse the command line for proper formatting
+                        Write-Verbose "[Load-StartupScriptsRegistry] Will try to parse command line for Script $scriptPath"
+                        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
+                        $entryExecutablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
+                        $entry.Command = Format-PathWithQuotes -Path $entryExecutablePath -ForceQuotes
+                        if ($parsedCommand[1].Count -gt 0) {
+                            $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
+                        }
+                            
+                        # Set working directory to script directory
+                        $workingDirectory = [System.IO.Path]::GetDirectoryName($scriptPath)
+                        $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -QuoteType Auto
+                            
+                        # Set trigger based on registry path
+                        if ($registryPath -like "*\Startup*") {
+                            $entry.Triggers = "Boot"
+                        }
+                        elseif ($registryPath -like "*\Logon*") {
+                            $entry.Triggers = "Logon"
+                        }
+                            
+                        $entries += $entry
+                        Write-Verbose "[Load-StartupScriptsRegistry] Added script: $scriptPath"
+                    }
+                    catch {
+                        Write-Verbose "[Load-StartupScriptsRegistry] Error processing script key $($scriptKey.Name): $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
+        else {
+            Write-Verbose "[Load-StartupScriptsRegistry] Registry path not found: $registryPath"
+        }
+    }
+    
+    Write-Host "Loaded $($entries.Count) Group Policy startup scripts from registry" -ForegroundColor Green
+    return $entries
+}
+
+# Function to deduplicate ApplicationEntry objects
+function Deduplicate-ApplicationEntries {
+    <#
+    .SYNOPSIS
+        Removes duplicate ApplicationEntry objects based on FileName and Command properties.
+    
+    .DESCRIPTION
+        Processes an array of ApplicationEntry objects and removes duplicates based on:
+        - Command property (exact match)
+        Also supports merge mode to check against existing applications.
+    
+    .PARAMETER Applications
+        Array of ApplicationEntry objects to deduplicate.
+    
+
+    
+    .RETURNS
+        [ApplicationEntry[]] Array of deduplicated ApplicationEntry objects.
+    
+    .EXAMPLE
+        PS> $deduplicated = Deduplicate-ApplicationEntries -Applications $validApplications
+        Returns: Array of unique ApplicationEntry objects
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [ApplicationEntry[]]$Applications
+    )
+    
+    $deduplicatedApplications = @()
+    $processedExecutables = @{}
+    $addedCount = 0
+    
+    foreach ($app in $Applications) {
+        # Get command for deduplication - only use Command property
+        $commandKey = $app.Command
+        
+        # Skip if already processed (duplicate command)
+        if ($processedExecutables.ContainsKey($commandKey)) {
+            Write-Verbose "Skipping duplicate Command: $commandKey"
+            continue
+        }
+        
+
+        
+        $deduplicatedApplications += $app
+        $processedExecutables[$commandKey] = $true
+        
+        Write-Verbose "Added: $($app.FileName)"
+        $addedCount++
+    }
+    
+    Write-Host "Added applications: $addedCount" -ForegroundColor Cyan
+    return $deduplicatedApplications
+}
+
+# Function to disable a single startup file by moving it to AutorunsDisabled subfolder
+function Disable-SingleStartupFile {
+    <#
+    .SYNOPSIS
+        Disables a startup file by moving it to an AutorunsDisabled subfolder.
+    
+    .DESCRIPTION
+        Moves the specified startup file to an AutorunsDisabled subfolder within the same directory,
+        effectively disabling it from running at startup.
+    
+    .PARAMETER FilePath
+        The full path to the startup file to disable.
+    
+    .RETURNS
+        [bool] True if the file was successfully disabled, False otherwise.
+    
+    .EXAMPLE
+        PS> Disable-SingleStartupFile -FilePath "C:\Users\User\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\example.lnk"
+        Returns: True if the file was successfully moved to AutorunsDisabled subfolder
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+    
+    try {
+        if (-not (Test-Path $FilePath)) {
+            Write-Verbose "File not found: $FilePath"
+            return $false
+        }
+        
+        $fileInfo = Get-Item -Path $FilePath
+        $directory = $fileInfo.DirectoryName
+        $fileName = $fileInfo.Name
+        
+        # Create AutorunsDisabled subfolder if it doesn't exist
+        $disabledFolder = Join-Path $directory "AutorunsDisabled"
+        if (-not (Test-Path $disabledFolder)) {
+            New-Item -Path $disabledFolder -ItemType Directory -Force | Out-Null
+            Write-Verbose "Created AutorunsDisabled folder: $disabledFolder"
+        }
+        
+        # Move the file to the disabled folder
+        $disabledPath = Join-Path $disabledFolder $fileName
+        Move-Item -Path $FilePath -Destination $disabledPath -Force
+        
+        Write-Verbose "Successfully disabled startup file: $fileName -> $disabledPath"
+        return $true
+    }
+    catch {
+        Write-Verbose "Failed to disable startup file $FilePath : $($_.Exception.Message)"
+        return $false
+    }
+}
+
+
 
 # Main script logic
 try {
@@ -2011,6 +2433,13 @@ try {
     
     # Load all startup-related tasks and applications
     $validApplications = @()
+
+    if ($Merge) {
+        $existingData = Read-ExistingIniFile -FilePath $OutputPath
+        if ($existingData -and $existingData.FileNames) {
+            $validApplications += $existingData.Applications
+        }
+    }
     
     if ($Tasks) {
         $validApplications += Load-StartupTasks
@@ -2022,77 +2451,15 @@ try {
         $validApplications += Load-StartupRegistry
     }
     if ($Scripts) {
-        $validApplications += Load-StartupScripts
+        $validApplications += Load-StartupScriptsFiles
+        $validApplications += Load-StartupScriptsRegistry
     }
 
     # If no startup parameters are specified, no applications will be loaded
-    
-    # Handle merge mode if specified
-    $existingData = $null
-    $existingFileNames = @()
-    if ($Merge) {
-        Write-Host "`nMerge mode enabled - checking existing INI file..." -ForegroundColor Cyan
-        $existingData = Read-ExistingIniFile -FilePath $OutputPath
-        if ($existingData -and $existingData.FileNames) {
-            $existingFileNames = $existingData.FileNames
-            
-            if ($existingData.Applications.Count -gt 0) {
-                Write-Host "Found $($existingData.Applications.Count) existing applications" -ForegroundColor Yellow
-                Write-Host "Will only add new applications not already present" -ForegroundColor Yellow
-                Write-Verbose "Existing FileNames to check against: $($existingFileNames -join ', ')"
-            }
-        }
-        else {
-            Write-Host "No existing INI file found or file is empty - will create new file" -ForegroundColor Yellow
-        }
-    }
-    
-    # Initialize variables for processing
-    $applications = @()
-    $processedExecutables = @{}
-    $addedCount = 0
-    
-    # Process collected application entries
-    foreach ($app in $validApplications) {
-        # Get executable path for deduplication - use both FileName and Command for better deduplication
-        $executablePath = $app.FileName
-        $commandKey = $app.Command
-        
-        # Skip if already processed (duplicate executable)
-        if ($processedExecutables.ContainsKey($executablePath)) {
-            Write-Verbose "Skipping duplicate FileName: $executablePath"
-            continue
-        }
-        
-        # Also check for duplicate commands
-        if ($processedExecutables.ContainsKey($commandKey)) {
-            Write-Verbose "Skipping duplicate Command: $commandKey"
-            continue
-        }
-        
-        # Check if this application already exists in merge mode
-        if ($Merge) {
-            Write-Verbose "  Checking for duplicate: '$($app.FileName)'"
-            Write-Verbose "  Existing FileNames: $($existingFileNames -join ', ')"
-            
-            if ($existingFileNames -contains $app.FileName) {
-                Write-Verbose "  MATCH FOUND - Skipping: $($app.FileName)"
-                continue
-            }
-            else {
-                Write-Verbose "  NO MATCH - Will add: $($app.FileName)"
-            }
-        }
-        
-        $applications += $app
-        $processedExecutables[$executablePath] = $true
-        $processedExecutables[$commandKey] = $true
-        
-        Write-Verbose "Added: $($app.FileName)"
-        $addedCount++
-    }
 
-    Write-Host "Added applications: $addedCount" -ForegroundColor Cyan
+    
+    # Deduplicate application entries
+    $applications = Deduplicate-ApplicationEntries -Applications $validApplications
     
     # Use the full command line (including parameters) used to invoke this script for documentation
     $Script:GeneralSettings.GeneratorCommand = $global:commandLine

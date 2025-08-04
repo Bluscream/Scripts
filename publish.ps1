@@ -5,7 +5,8 @@ param(
     [switch]$Nuget,
     [switch]$Github,
     [string]$Arch,
-    [switch]$Git
+    [switch]$Git,
+    [string]$Repo
 )
 
 $gitignore_template = @"
@@ -87,7 +88,8 @@ if (-not $Csproj) {
         Write-Error "No .csproj files found."
         exit 1
     }
-} else {
+}
+else {
     $csprojFiles = @((Resolve-Path $Csproj).Path)
 }
 
@@ -110,7 +112,8 @@ foreach ($csproj in $csprojFiles) {
     $projectFramework = $null
     if ($projectTargetFrameworkNode -and $projectTargetFrameworkNode.TargetFramework) {
         $projectFramework = $projectTargetFrameworkNode.TargetFramework
-    } elseif ($projectFrameworkNode -and $projectFrameworkNode.Framework) {
+    }
+    elseif ($projectFrameworkNode -and $projectFrameworkNode.Framework) {
         $projectFramework = $projectFrameworkNode.Framework
     }
     Write-Host "Project framework: $projectFramework"
@@ -118,11 +121,14 @@ foreach ($csproj in $csprojFiles) {
     # Determine architecture
     if ($Arch) {
         $arch = $Arch
-    } elseif ($projectRIDNode -and $projectRIDNode.RuntimeIdentifier) {
+    }
+    elseif ($projectRIDNode -and $projectRIDNode.RuntimeIdentifier) {
         $arch = $projectRIDNode.RuntimeIdentifier
-    } elseif ($projectRIDsNode -and $projectRIDsNode.RuntimeIdentifiers) {
+    }
+    elseif ($projectRIDsNode -and $projectRIDsNode.RuntimeIdentifiers) {
         $arch = ($projectRIDsNode.RuntimeIdentifiers -split ';')[0]
-    } else {
+    }
+    else {
         $arch = 'win-x64'
     }
     Write-Host "Using architecture: $arch"
@@ -143,7 +149,8 @@ foreach ($csproj in $csprojFiles) {
     $outputAssemblyName = $null
     if ($projectAssemblyNameNode -and $projectAssemblyNameNode.AssemblyName -and $projectAssemblyNameNode.AssemblyName -ne "") {
         $outputAssemblyName = $projectAssemblyNameNode.AssemblyName
-    } else {
+    }
+    else {
         $outputAssemblyName = $projectName
     }
     Write-Host "Output assembly name: $outputAssemblyName"
@@ -161,13 +168,15 @@ foreach ($csproj in $csprojFiles) {
         $firstPropertyGroup.AppendChild($versionElement) | Out-Null
         $projectXml.Save($csproj)
         Write-Host "Created <Version> property with value $newVersion in $csproj."
-    } else {
+    }
+    else {
         $oldVersion = $projectVersionNode.Version
         Write-Host "Old version: $oldVersion"
         if ($Version) {
             Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
             $newVersion = $Version
-        } else {
+        }
+        else {
             $newVersion = Bump-Version -oldVersion $oldVersion
             Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
         }
@@ -186,7 +195,8 @@ foreach ($csproj in $csprojFiles) {
                     try {
                         Stop-Process -Id $proc.Id -Force -ErrorAction Stop
                         Write-Host "Killed process $($proc.Id) ($($proc.ProcessName))"
-                    } catch {
+                    }
+                    catch {
                         Write-Host "Failed to kill process $($proc.Id): $_" -ForegroundColor Yellow
                     }
                 }
@@ -202,7 +212,7 @@ foreach ($csproj in $csprojFiles) {
     if (Test-Path "$projectDir/obj") { Remove-Item -Recurse -Force "$projectDir/obj" }
     if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
 
-    $outputFrameworkExe = $null;$outputStandaloneExe = $null;$outputBinPath = $null
+    $outputFrameworkExe = $null; $outputStandaloneExe = $null; $outputBinPath = $null
     Write-Host "Building DLL..."
     dotnet publish -c Release -r $arch 
     $dllPath = Get-ChildItem -Path "bin/Release/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
@@ -211,7 +221,8 @@ foreach ($csproj in $csprojFiles) {
         $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffix.dll"
         Copy-Item $dllPath.FullName $dllDest -Force
         Write-Host "DLL built successfully: $dllDest"
-    } else {
+    }
+    else {
         Write-Host "DLL not found after build" -ForegroundColor Red
     }
     if ($LASTEXITCODE -ne 0) {
@@ -249,20 +260,23 @@ foreach ($csproj in $csprojFiles) {
     # For upload, always use the arch-suffixed names
     if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
         $outputBinPath = Join-Path $outputBinDir $fwExeName
-    } elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
+    }
+    elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
         $outputBinPath = Join-Path $outputBinDir $scExeName
     }
 
     function Create-GitHubRepo {
-        Write-Host "Creating GitHub repository $projectName..."
+        $repoName = if ($Repo) { $Repo } else { $projectName }
+        Write-Host "Creating GitHub repository $repoName..."
         $repoUrl = git remote get-url origin
         if (-not $repoUrl) {
-            gh repo create $projectName --source . --public --confirm
-            $repoUrl = gh repo view $projectName --json url -q ".url"
+            gh repo create $repoName --source . --public --confirm
+            $repoUrl = gh repo view $repoName --json url -q ".url"
             git remote add origin $repoUrl
             return $repoUrl
-        } else {
-            Write-Host "GitHub repository for $projectName already exists."
+        }
+        else {
+            Write-Host "GitHub repository for $repoName already exists."
         }
     }
 
@@ -308,7 +322,8 @@ foreach ($csproj in $csprojFiles) {
         try {
             $existingRelease = & gh release view $tag 2>$null
             $releaseExists = $true
-        } catch {
+        }
+        catch {
             $releaseExists = $false
         }
         $ErrorActionPreference = 'Stop'
@@ -317,7 +332,8 @@ foreach ($csproj in $csprojFiles) {
             foreach ($asset in $assets) {
                 gh release upload $tag $($asset.FullName) --clobber
             }
-        } else {
+        }
+        else {
             Write-Host "Creating new release $tag and uploading asset(s)..."
             gh release create $tag ($assets | ForEach-Object { $_.FullName }) --title "$releaseName" --notes "$releaseNotes"
         }
