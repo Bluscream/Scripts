@@ -1,6 +1,7 @@
 # Build script - handles building and version management
 # Publishing functionality has been moved to publish.ps1
 # Git operations: commit in build.ps1, push in publish.ps1
+# Docker operations: build images in build.ps1, push to registries in publish.ps1
 
 param(
     [string]$Csproj,
@@ -8,7 +9,8 @@ param(
     [string]$Arch,
     [switch]$Release,
     [switch]$Debug,
-    [switch]$Git
+    [switch]$Git,
+    [switch]$Docker
 )
 
 $gitignore_template = @"
@@ -306,5 +308,77 @@ foreach ($csproj in $csprojFiles) {
         Commit-Git
     }
 
+    # Build Docker images if requested
+    Write-Host "Docker flag: $Docker"
+    if ($Docker) {
+        Write-Host "Starting Docker image building..."
+        Build-DockerImages
+    }
+    else {
+        Write-Host "Docker building skipped (Docker flag not set)"
+    }
+
     Pop-Location
+}
+
+function Build-DockerImages {
+    Write-Host "Building Docker images..."
+    
+    # Find Dockerfile(s)
+    $dockerfiles = Get-ChildItem -Path $projectDir -Filter "Dockerfile*" -Recurse -ErrorAction SilentlyContinue
+    if ($dockerfiles.Count -eq 0) {
+        Write-Host "No Dockerfile found in $projectDir. Creating a default Dockerfile..."
+        $dockerfileContent = @"
+FROM mcr.microsoft.com/dotnet/runtime:8.0 AS base
+WORKDIR /app
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY ["$projectName.csproj", "./"]
+RUN dotnet restore "$projectName.csproj"
+COPY . .
+WORKDIR "/src"
+RUN dotnet build "$projectName.csproj" -c Release -o /app/build
+
+FROM build AS publish
+RUN dotnet publish "$projectName.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "$projectName.dll"]
+"@
+        $dockerfilePath = Join-Path $projectDir "Dockerfile"
+        $dockerfileContent | Out-File -FilePath $dockerfilePath -Encoding UTF8
+        $dockerfiles = @(Get-Item $dockerfilePath)
+        Write-Host "Created default Dockerfile at $dockerfilePath"
+    }
+    
+    foreach ($dockerfile in $dockerfiles) {
+        Write-Host "Processing Dockerfile: $($dockerfile.FullName)"
+        
+        # Build for each configuration
+        foreach ($config in $buildConfigs) {
+            $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
+            
+            # Build Docker image for Docker Hub
+            $dockerImageName = "$projectName$configSuffix"
+            $dockerTag = "${dockerImageName}:$newVersion"
+            $dockerLatestTag = "${dockerImageName}:latest"
+            
+            Write-Host "Building Docker image: $dockerTag"
+            docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$config .
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Docker image built successfully: $dockerTag"
+                
+                # Tag as latest
+                docker tag $dockerTag $dockerLatestTag
+                Write-Host "Tagged as latest: $dockerLatestTag"
+            }
+            else {
+                Write-Host "Failed to build Docker image: $dockerTag" -ForegroundColor Red
+            }
+        }
+    }
 } 

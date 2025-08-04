@@ -1,6 +1,7 @@
 # Publish script - handles publishing to various platforms
 # Build functionality has been moved to build.ps1
-# Git operations: commit in build.ps1, push in publish.ps1
+# Git operations: commit in build.ps1, push in publish.ps1 (before publishing)
+# Docker operations: build images in build.ps1, push to registries in publish.ps1
 # Use -SkipBuild to skip the build step if you've already built the project
 # Example: .\publish.ps1 -Nuget -Github -Docker -Ghcr -SkipBuild
 
@@ -23,14 +24,15 @@ param(
 if (-not $SkipBuild) {
     Write-Host "Running build.ps1..."
     $buildParams = @()
-    if ($Csproj) { $buildParams += "-Csproj", $Csproj }
-    if ($Version) { $buildParams += "-Version", $Version }
-    if ($Arch) { $buildParams += "-Arch", $Arch }
+    if ($Csproj) { $buildParams += "-Csproj"; $buildParams += $Csproj }
+    if ($Version) { $buildParams += "-Version"; $buildParams += $Version }
+    if ($Arch) { $buildParams += "-Arch"; $buildParams += $Arch }
     if ($Release) { $buildParams += "-Release" }
     if ($Debug) { $buildParams += "-Debug" }
     if ($Git) { $buildParams += "-Git" }
+    if ($Docker -or $Ghcr) { $buildParams += "-Docker" }
     
-    & "$PSScriptRoot\build.ps1" @buildParams
+    & "build.ps1" @buildParams
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build failed with exit code $LASTEXITCODE"
         exit $LASTEXITCODE
@@ -148,15 +150,12 @@ foreach ($csproj in $csprojFiles) {
         }
     }
 
-
-
-
-    if ($Github) {
+    function Publish-GitHubRelease {
+        Write-Host "Publishing to GitHub Releases..."
         $assets = @(Get-ChildItem -Path $outputBinDir -Filter *.exe -File) + @(Get-ChildItem -Path $outputBinDir -Filter *.dll -File)
         if (-not $assets -or $assets.Count -eq 0) {
             Write-Error "No DLL or EXE found after build for $outputAssemblyName."
-            Pop-Location
-            exit 1
+            return $false
         }
         Write-Host "Assets: $assets"
 
@@ -184,17 +183,18 @@ foreach ($csproj in $csprojFiles) {
             Write-Host "Creating new release $tag and uploading asset(s)..."
             gh release create $tag ($assets | ForEach-Object { $_.FullName }) --title "$releaseName" --notes "$releaseNotes"
         }
+        return $true
     }
 
-    if ($Nuget) {
+    function Publish-NuGet {
+        Write-Host "Publishing to NuGet..."
         dotnet pack --configuration Release
     
         # Find nupkg
         $nupkg = Get-ChildItem -Path 'bin/Release' -Filter "$projectName.*.nupkg" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if (-not $nupkg) {
             Write-Error "No nupkg found for $projectName."
-            Pop-Location
-            exit 1
+            return $false
         }
         # Push to NuGet
         Write-Host "Pushing $($nupkg.FullName) to NuGet..."
@@ -204,136 +204,143 @@ foreach ($csproj in $csprojFiles) {
         $packageUrl = "https://www.nuget.org/packages/$projectName/$newVersion/Manage"
         Write-Host "Opening NuGet package management page for version $newVersion..."
         Start-Process $packageUrl
+        return $true
     }
 
-    # Docker and GHCR publishing
-    if ($Docker -or $Ghcr) {
-        Write-Host "Processing Docker builds and publishing..."
+    function Publish-DockerHub {
+        Write-Host "Publishing to Docker Hub..."
         
-        # Get usernames from environment variables
+        # Get username from environment variables
         $dockerUsername = if ($env:DOCKER_USERNAME) { $env:DOCKER_USERNAME } else { $env:USERNAME }
-        $githubUsername = if ($env:GITHUB_USERNAME) { $env:GITHUB_USERNAME } else { $env:USERNAME }
         
-        if ($Docker -and (-not $dockerUsername)) {
+        if (-not $dockerUsername) {
             Write-Error "DOCKER_USERNAME environment variable is required for Docker publishing."
-            Pop-Location
-            exit 1
+            return $false
         }
         
-        if ($Ghcr -and (-not $githubUsername)) {
-            Write-Error "GITHUB_USERNAME environment variable is required for GHCR publishing."
-            Pop-Location
-            exit 1
-        }
+        $success = $true
         
-        # Find Dockerfile(s)
-        $dockerfiles = Get-ChildItem -Path $projectDir -Filter "Dockerfile*" -Recurse -ErrorAction SilentlyContinue
-        if ($dockerfiles.Count -eq 0) {
-            Write-Host "No Dockerfile found in $projectDir. Creating a default Dockerfile..."
-            $dockerfileContent = @"
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS base
-WORKDIR /app
-
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-WORKDIR /src
-COPY ["$projectName.csproj", "./"]
-RUN dotnet restore "$projectName.csproj"
-COPY . .
-WORKDIR "/src"
-RUN dotnet build "$projectName.csproj" -c Release -o /app/build
-
-FROM build AS publish
-RUN dotnet publish "$projectName.csproj" -c Release -o /app/publish /p:UseAppHost=false
-
-FROM base AS final
-WORKDIR /app
-COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "$projectName.dll"]
-"@
-            $dockerfilePath = Join-Path $projectDir "Dockerfile"
-            $dockerfileContent | Out-File -FilePath $dockerfilePath -Encoding UTF8
-            $dockerfiles = @(Get-Item $dockerfilePath)
-            Write-Host "Created default Dockerfile at $dockerfilePath"
-        }
-        
-        foreach ($dockerfile in $dockerfiles) {
-            Write-Host "Processing Dockerfile: $($dockerfile.FullName)"
+        # Push for each configuration
+        foreach ($config in $buildConfigs) {
+            $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
             
-            # Build for each configuration
-            foreach ($config in $buildConfigs) {
-                $configLower = $config.ToLower()
-                $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
-                
-                # Docker Hub publishing
-                if ($Docker) {
-                    Write-Host "Building and publishing to Docker Hub for $config configuration..."
-                    
-                    # Build Docker image
-                    $dockerImageName = "$dockerUsername/$projectName$configSuffix"
-                    $dockerTag = "${dockerImageName}:$newVersion"
-                    $dockerLatestTag = "${dockerImageName}:latest"
-                    
-                    Write-Host "Building Docker image: $dockerTag"
-                    docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$config .
-                    
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Host "Docker image built successfully: $dockerTag"
-                        
-                        # Tag as latest
-                        docker tag $dockerTag $dockerLatestTag
-                        
-                        # Push to Docker Hub
-                        Write-Host "Pushing to Docker Hub: $dockerTag"
-                        docker push $dockerTag
-                        
-                        Write-Host "Pushing to Docker Hub: $dockerLatestTag"
-                        docker push $dockerLatestTag
-                        
-                        Write-Host "Successfully published to Docker Hub: $dockerImageName"
-                    }
-                    else {
-                        Write-Host "Failed to build Docker image for $config configuration" -ForegroundColor Red
-                    }
-                }
-                
-                # GitHub Container Registry publishing
-                if ($Ghcr) {
-                    Write-Host "Building and publishing to GHCR for $config configuration..."
-                    
-                    # Build Docker image for GHCR
-                    $ghcrImageName = "ghcr.io/$githubUsername/$projectName$configSuffix"
-                    $ghcrTag = "${ghcrImageName}:$newVersion"
-                    $ghcrLatestTag = "${ghcrImageName}:latest"
-                    
-                    Write-Host "Building Docker image for GHCR: $ghcrTag"
-                    docker build -f $dockerfile.FullName -t $ghcrTag --build-arg CONFIGURATION=$config .
-                    
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Host "Docker image built successfully for GHCR: $ghcrTag"
-                        
-                        # Tag as latest
-                        docker tag $ghcrTag $ghcrLatestTag
-                        
-                        # Push to GHCR
-                        Write-Host "Pushing to GHCR: $ghcrTag"
-                        docker push $ghcrTag
-                        
-                        Write-Host "Pushing to GHCR: $ghcrLatestTag"
-                        docker push $ghcrLatestTag
-                        
-                        Write-Host "Successfully published to GHCR: $ghcrImageName"
-                    }
-                    else {
-                        Write-Host "Failed to build Docker image for GHCR $config configuration" -ForegroundColor Red
-                    }
-                }
+            # Docker image names (built in build.ps1)
+            $localImageName = "$projectName$configSuffix"
+            $dockerImageName = "$dockerUsername/$projectName$configSuffix"
+            $dockerTag = "${dockerImageName}:$newVersion"
+            $dockerLatestTag = "${dockerImageName}:latest"
+            
+            # Tag local image with Docker Hub name
+            Write-Host "Tagging local image for Docker Hub: $dockerTag"
+            docker tag "${localImageName}:$newVersion" $dockerTag
+            docker tag "${localImageName}:latest" $dockerLatestTag
+            
+            # Push to Docker Hub
+            Write-Host "Pushing to Docker Hub: $dockerTag"
+            docker push $dockerTag
+            
+            Write-Host "Pushing to Docker Hub: $dockerLatestTag"
+            docker push $dockerLatestTag
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully published to Docker Hub: $dockerImageName"
+            }
+            else {
+                Write-Host "Failed to push to Docker Hub: $dockerImageName" -ForegroundColor Red
+                $success = $false
             }
         }
+        return $success
     }
 
-    # Push to git after all publishing operations are complete
+    function Publish-GHCR {
+        Write-Host "Publishing to GitHub Container Registry..."
+        
+        # Get username from environment variables
+        $githubUsername = if ($env:GITHUB_USERNAME) { $env:GITHUB_USERNAME } else { $env:USERNAME }
+        
+        if (-not $githubUsername) {
+            Write-Error "GITHUB_USERNAME environment variable is required for GHCR publishing."
+            return $false
+        }
+        
+        $success = $true
+        
+        # Push for each configuration
+        foreach ($config in $buildConfigs) {
+            $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
+            
+            # Docker image names (built in build.ps1)
+            $localImageName = "$projectName$configSuffix"
+            $ghcrImageName = "ghcr.io/$githubUsername/$projectName$configSuffix"
+            $ghcrTag = "${ghcrImageName}:$newVersion"
+            $ghcrLatestTag = "${ghcrImageName}:latest"
+            
+            # Tag local image with GHCR name
+            Write-Host "Tagging local image for GHCR: $ghcrTag"
+            docker tag "${localImageName}:$newVersion" $ghcrTag
+            docker tag "${localImageName}:latest" $ghcrLatestTag
+            
+            # Push to GHCR
+            Write-Host "Pushing to GHCR: $ghcrTag"
+            docker push $ghcrTag
+            
+            Write-Host "Pushing to GHCR: $ghcrLatestTag"
+            docker push $ghcrLatestTag
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully published to GHCR: $ghcrImageName"
+            }
+            else {
+                Write-Host "Failed to push to GHCR: $ghcrImageName" -ForegroundColor Red
+                $success = $false
+            }
+        }
+        return $success
+    }
+
+
+
+
+    # Push to git first if requested
     if ($Git) {
+        Write-Host "Pushing to git before publishing..."
         Push-Git
+    }
+
+    # Track publishing success
+    $publishSuccess = $true
+
+    if ($Github) {
+        if (-not (Publish-GitHubRelease)) {
+            $publishSuccess = $false
+        }
+    }
+
+    if ($Nuget) {
+        if (-not (Publish-NuGet)) {
+            $publishSuccess = $false
+        }
+    }
+
+    if ($Docker) {
+        if (-not (Publish-DockerHub)) {
+            $publishSuccess = $false
+        }
+    }
+
+    if ($Ghcr) {
+        if (-not (Publish-GHCR)) {
+            $publishSuccess = $false
+        }
+    }
+
+    # Summary
+    if ($publishSuccess) {
+        Write-Host "All publishing operations completed successfully!" -ForegroundColor Green
+    }
+    else {
+        Write-Warning "Some publishing operations failed. Check the output above for details."
     }
 
     Pop-Location
