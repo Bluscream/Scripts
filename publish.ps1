@@ -1,5 +1,10 @@
+# Publish script - handles publishing to various platforms
+# Build functionality has been moved to build.ps1
+# Git operations: commit in build.ps1, push in publish.ps1
+# Use -SkipBuild to skip the build step if you've already built the project
+# Example: .\publish.ps1 -Nuget -Github -Docker -Ghcr -SkipBuild
+
 param(
-    [string]$NugetApiKey,
     [string]$Csproj,
     [string]$Version,
     [switch]$Nuget,
@@ -10,78 +15,35 @@ param(
     [switch]$Release,
     [switch]$Debug,
     [switch]$Docker,
-    [switch]$Ghcr
+    [switch]$Ghcr,
+    [switch]$SkipBuild
 )
 
-$gitignore_template = @"
-bin/
-obj/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-.vs/
-*.nupkg
-*.snupkg
-*.log
-*.DS_Store
-*.swp
-*.scc
-*.pdb
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
-*.bak
-*.tmp
-*.cache
-*.TestResults/
-TestResults/
-"@
-
-function Bump-Version {
-    param([string]$oldVersion)
-    $parts = $oldVersion -split '\.'
-    # Ensure at least 4 parts
-    while ($parts.Count -lt 4) { $parts += '0' }
-    $major = [int]$parts[0]
-    $minor = [int]$parts[1]
-    $patch = [int]$parts[2]
-    $build = [int]$parts[3]
-    $build++
-    if ($build -gt 9) {
-        $build = 0
-        $patch++
+# Call build.ps1 if not skipping build
+if (-not $SkipBuild) {
+    Write-Host "Running build.ps1..."
+    $buildParams = @()
+    if ($Csproj) { $buildParams += "-Csproj", $Csproj }
+    if ($Version) { $buildParams += "-Version", $Version }
+    if ($Arch) { $buildParams += "-Arch", $Arch }
+    if ($Release) { $buildParams += "-Release" }
+    if ($Debug) { $buildParams += "-Debug" }
+    if ($Git) { $buildParams += "-Git" }
+    
+    & "$PSScriptRoot\build.ps1" @buildParams
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Build failed with exit code $LASTEXITCODE"
+        exit $LASTEXITCODE
     }
-    # If patch ever needs to roll over, add logic here
-    $newVersion = "$major.$minor.$patch.$build"
-    Write-Host "Bumped Version: $oldVersion -> $newVersion"
-    return $newVersion
-}
-function Set-Version {
-    param(
-        [xml]$projXml,
-        $versionNode,
-        [string]$newVersion,
-        [string]$csproj
-    )
-    $versionNode.Version = $newVersion
-    $projXml.Save($csproj)
-    Write-Host "Updated version to $newVersion in $csproj"
 }
 
 $ErrorActionPreference = 'Stop'
 
 # Try to set NugetApiKey from environment if not provided
-if (-not $NugetApiKey -or $NugetApiKey -eq "") {
-    if ($env:NUGET_API_KEY) {
-        $NugetApiKey = $env:NUGET_API_KEY
-    }
-}
+$NugetApiKey = $env:NUGET_API_KEY
 
 if ($Nuget -and (-not $NugetApiKey -or $NugetApiKey -eq "")) {
-    Write-Error "NugetApiKey is required for Nuget publishing. Please provide it as a parameter or set the NUGET_API_KEY environment variable."
+    Write-Error "NugetApiKey is required for Nuget publishing. Please set the NUGET_API_KEY environment variable."
     exit 1
 }
 
@@ -137,7 +99,22 @@ foreach ($csproj in $csprojFiles) {
     }
     Write-Host "Using architecture: $arch"
 
-    # Determine build configurations
+    $outputBinDir = Join-Path $projectDir 'bin'
+    Write-Host "Output binary directory: $outputBinDir"
+    $outputAssemblyName = $null
+    if ($projectAssemblyNameNode -and $projectAssemblyNameNode.AssemblyName -and $projectAssemblyNameNode.AssemblyName -ne "") {
+        $outputAssemblyName = $projectAssemblyNameNode.AssemblyName
+    }
+    else {
+        $outputAssemblyName = $projectName
+    }
+    Write-Host "Output assembly name: $outputAssemblyName"
+
+    # Get the current version for publishing
+    $newVersion = $projectVersionNode.Version
+    Write-Host "Current version for publishing: $newVersion"
+
+    # Determine build configurations for Docker builds
     $buildConfigs = @()
     if ($Release) {
         $buildConfigs += "Release"
@@ -150,150 +127,10 @@ foreach ($csproj in $csprojFiles) {
     if ($buildConfigs.Count -eq 0) {
         $buildConfigs = @("Release", "Debug")
     }
-    
-    Write-Host "Build configurations: $($buildConfigs -join ', ')"
 
-    $outputFrameworkSuffix = ".$projectFramework.$arch.exe"
-    $outputSelfcontainedSuffix = ".standalone.$arch.exe"
-    $outputBinarySuffix = ".$arch"
-
-    $outputType = $projectXml.Project.PropertyGroup | Where-Object { $_.OutputType } | Select-Object -First 1
-    Write-Host "Output type: $outputType"
-    $outputIsExe = $false
-    if ($outputType.OutputType) {
-        $outputTypeValue = $outputType.OutputType.ToString()
-        $outputIsExe = ($outputTypeValue -ieq 'Exe' -or $outputTypeValue -ieq 'WinExe')
-    }
-    $outputBinDir = Join-Path $projectDir 'bin'
-    Write-Host "Output binary directory: $outputBinDir"
-    $outputAssemblyName = $null
-    if ($projectAssemblyNameNode -and $projectAssemblyNameNode.AssemblyName -and $projectAssemblyNameNode.AssemblyName -ne "") {
-        $outputAssemblyName = $projectAssemblyNameNode.AssemblyName
-    }
-    else {
-        $outputAssemblyName = $projectName
-    }
-    Write-Host "Output assembly name: $outputAssemblyName"
-
-    if (-not $projectVersionNode) {
-        Write-Host "No <Version> property found in any <PropertyGroup> in $csproj. Creating one with default version 1.0.0.0."
-        $firstPropertyGroup = $projectXml.Project.PropertyGroup | Select-Object -First 1
-        if (-not $firstPropertyGroup) {
-            Write-Error "No <PropertyGroup> found in $csproj to add <Version> property."
-            exit 1
-        }
-        $newVersion = '1.0.0.0'
-        $versionElement = $projectXml.CreateElement('Version')
-        $versionElement.InnerText = $newVersion
-        $firstPropertyGroup.AppendChild($versionElement) | Out-Null
-        $projectXml.Save($csproj)
-        Write-Host "Created <Version> property with value $newVersion in $csproj."
-    }
-    else {
-        $oldVersion = $projectVersionNode.Version
-        Write-Host "Old version: $oldVersion"
-        if ($Version) {
-            Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $Version -csproj $csproj
-            $newVersion = $Version
-        }
-        else {
-            $newVersion = Bump-Version -oldVersion $oldVersion
-            Set-Version -projXml $projectXml -versionNode $projectVersionNode -newVersion $newVersion -csproj $csproj
-        }
-        Write-Host "New version: $newVersion"
-    }
-
-    function Kill-ProcessesByName {
-        param (
-            [string[]]$Names
-        )
-        foreach ($procName in $Names) {
-            $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
-            if ($procs) {
-                Write-Host "Killing running process(es) named $procName..."
-                foreach ($proc in $procs) {
-                    try {
-                        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                        Write-Host "Killed process $($proc.Id) ($($proc.ProcessName))"
-                    }
-                    catch {
-                        Write-Host "Failed to kill process $($proc.Id): $_" -ForegroundColor Yellow
-                    }
-                }
-            }
-        }
-    }
-    $processNames = @($outputAssemblyName, "dotnet")
-    Kill-ProcessesByName -Names $processNames
-
-    dotnet clean
-    # Delete bin and obj folders if they exist
-    if (Test-Path $outputBinDir) { Remove-Item -Recurse -Force $outputBinDir }
-    if (Test-Path "$projectDir/obj") { Remove-Item -Recurse -Force "$projectDir/obj" }
-    if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
-
-    $outputFrameworkExe = $null; $outputStandaloneExe = $null; $outputBinPath = $null
-    
-    # Build for each configuration
-    foreach ($config in $buildConfigs) {
-        Write-Host "Building for configuration: $config"
-        
-        # Determine suffix based on configuration
-        $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
-        $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
-        $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
-        $outputBinarySuffixWithConfig = ".$arch$configSuffix"
-        
-        Write-Host "Building DLL for $config..."
-        dotnet publish -c $config -r $arch 
-        $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
-        Write-Host "Output DLL: $dllPath"
-        if ($dllPath) {
-            $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
-            Copy-Item $dllPath.FullName $dllDest -Force
-            Write-Host "DLL built successfully: $dllDest"
-        }
-        else {
-            Write-Host "DLL not found after build" -ForegroundColor Red
-        }
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        
-        Write-Host "Building Framework-dependent EXE for $config..."
-        # Framework-dependent build
-        dotnet publish -c $config -r $arch --self-contained false
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
-        Write-Host "Output framework EXE: $outputFrameworkExe"
-        $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
-        if ($outputFrameworkExe) {
-            Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
-            Write-Host "Framework-dependent EXE built successfully: $fwExeName"
-        }
-        
-        Write-Host "Building Self-contained EXE for $config..."
-        dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-        }
-        $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        Write-Host "Output standalone EXE: $outputStandaloneExe"
-        $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
-        if ($outputStandaloneExe) {
-            Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
-            Write-Host "Self-contained EXE built successfully: $scExeName"
-        }
-        
-        # For upload, always use the arch-suffixed names
-        if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
-            $outputBinPath = Join-Path $outputBinDir $fwExeName
-        }
-        elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
-            $outputBinPath = Join-Path $outputBinDir $scExeName
-        }
+    function Push-Git {
+        Write-Host "Pushing changes to git..."
+        git push
     }
 
     function Create-GitHubRepo {
@@ -311,28 +148,7 @@ foreach ($csproj in $csprojFiles) {
         }
     }
 
-    function Push-Git {
-        Write-Host "Committing and pushing changes to git..."
 
-        if (-not (Test-Path ".git")) {
-            Write-Host "Initializing new git repository..."
-            git init        
-            git branch -M main
-        }
-
-        if (-not (Test-Path ".gitignore")) {
-            Write-Host "Creating .gitignore file..."
-            $gitignore_template | Out-File -Encoding utf8 ".gitignore"
-        }
-        git add .
-        $datetime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        git commit -m "Publish at $datetime"
-        git push
-    }
-
-    if ($Git) {
-        Push-Git
-    }
 
 
     if ($Github) {
@@ -384,9 +200,9 @@ foreach ($csproj in $csprojFiles) {
         Write-Host "Pushing $($nupkg.FullName) to NuGet..."
         dotnet nuget push $nupkg.FullName --api-key $NugetApiKey --source https://api.nuget.org/v3/index.json --skip-duplicate
 
-        # Open the NuGet package management page for the previous version in the default browser
-        $packageUrl = "https://www.nuget.org/packages/$projectName/$oldVersion/Manage"
-        Write-Host "Opening NuGet package management page for version $oldVersion..."
+        # Open the NuGet package management page for the current version in the default browser
+        $packageUrl = "https://www.nuget.org/packages/$projectName/$newVersion/Manage"
+        Write-Host "Opening NuGet package management page for version $newVersion..."
         Start-Process $packageUrl
     }
 
@@ -513,6 +329,11 @@ ENTRYPOINT ["dotnet", "$projectName.dll"]
                 }
             }
         }
+    }
+
+    # Push to git after all publishing operations are complete
+    if ($Git) {
+        Push-Git
     }
 
     Pop-Location
