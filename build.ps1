@@ -244,22 +244,39 @@ ENTRYPOINT ["dotnet", "$projectName.dll"]
         Write-Host "Created default Dockerfile at $dockerfilePath"
     }
     
-    foreach ($dockerfile in $dockerfiles) {
-        Write-Host "Processing Dockerfile: $($dockerfile.FullName)"
-        
-        # Build for each configuration
-        foreach ($config in $buildConfigs) {
-            $configTag = if ($config -eq "Release") { "release" } else { "debug" }
-            
-            # Build Docker image using repository name as base
-            $dockerImageName = if ($repo) { $repo.ToLower() } else { $projectName.ToLower() }
-            $dockerTag = "${dockerImageName}:$configTag-$newVersion"
-            $dockerLatestTag = "${dockerImageName}:$configTag-latest"
-            
-            Write-Host "Building Docker image: $dockerTag"
-            docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$config .
-            
-                         if ($LASTEXITCODE -eq 0) {
+         foreach ($dockerfile in $dockerfiles) {
+         Write-Host "Processing Dockerfile: $($dockerfile.FullName)"
+         
+         # Determine configuration based on Dockerfile name
+         $dockerfileName = $dockerfile.Name
+         $configToBuild = $null
+         
+         if ($dockerfileName -eq "Dockerfile") {
+             # Default Dockerfile builds release
+             $configToBuild = "Release"
+         }
+         elseif ($dockerfileName -eq "Dockerfile.debug") {
+             # Dockerfile.debug builds debug
+             $configToBuild = "Debug"
+         }
+         elseif ($dockerfileName -match "^Dockerfile\.(.+)$") {
+             # Dockerfile.(something) builds the (something) configuration
+             $configToBuild = $matches[1]
+         }
+         
+         # Only build if this configuration is requested
+         if ($configToBuild -and $buildConfigs -contains $configToBuild) {
+             $configTag = if ($configToBuild -eq "Release") { "release" } else { "debug" }
+             
+             # Build Docker image using repository name as base
+             $dockerImageName = if ($repo) { $repo.ToLower() } else { $projectName.ToLower() }
+             $dockerTag = "${dockerImageName}:$configTag-$newVersion"
+             $dockerLatestTag = "${dockerImageName}:$configTag-latest"
+             
+             Write-Host "Building Docker image: $dockerTag"
+             docker build -f $dockerfile.FullName -t $dockerTag --build-arg CONFIGURATION=$configToBuild .
+             
+             if ($LASTEXITCODE -eq 0) {
                  Write-Host "Docker image built successfully: $dockerTag" -ForegroundColor Green
                  
                  # Tag as latest
@@ -269,8 +286,11 @@ ENTRYPOINT ["dotnet", "$projectName.dll"]
              else {
                  Write-Host "Failed to build Docker image: $dockerTag" -ForegroundColor Red
              }
-        }
-    }
+         }
+         else {
+             Write-Host "Skipping Dockerfile $dockerfileName - configuration '$configToBuild' not in requested build configs: $($buildConfigs -join ', ')" -ForegroundColor Yellow
+         }
+     }
 }
 
 function Publish-GitHubRelease {
@@ -290,7 +310,7 @@ function Publish-GitHubRelease {
     }
     
     # Get GitHub username
-    $githubUsername = Get-Username -Service "GitHub"
+    $githubUsername = Get-Username -Service "gitHub"
     if (-not $githubUsername) {
         return $false
     }
@@ -312,9 +332,9 @@ function Publish-GitHubRelease {
      else {
          Write-Host "GitHub release created successfully" -ForegroundColor Green
      }
-    
+     
     # Upload assets in parallel - only get files from the main bin directory, not subdirectories
-    $assets = Get-ChildItem -Path $outputBinDir -Filter "*.exe" -File
+    $assets = Get-ChildItem -Path $outputBinDir -Include *.exe,*.dll,*.nupkg -File
     $uploadJobs = @()
     
     foreach ($asset in $assets) {
@@ -414,7 +434,7 @@ function Publish-DockerHub {
     Write-Host "Publishing to Docker Hub..."
     
     # Get Docker username
-    $dockerUsername = Get-Username -Service "Docker"
+    $dockerUsername = Get-Username -Service "docker"
     if (-not $dockerUsername) {
         return $false
     }
