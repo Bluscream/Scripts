@@ -1,6 +1,5 @@
 [CmdletBinding()]
-#Requires -Version 5.1
-
+#Requires -Version 7.2
 <#
 .SYNOPSIS
     Converts Windows Scheduled Tasks to RestartOnCrash INI format
@@ -163,29 +162,72 @@ if (-not $NoElevate -and -not ([Security.Principal.WindowsPrincipal] [Security.P
 # Executable class to hold executable information
 class Executable {
     [string]$Path
-    [string]$Arguments
-    
-    Executable([string]$path, [string]$arguments = "") {
+    [string[]]$Arguments
+
+    Executable([string]$path, [object]$arguments = $null) {
+        $this.Path = $path
+        if ($null -eq $arguments) {
+            $this.Arguments = @()
+        }
+        elseif ($arguments -is [string]) {
+            if ($arguments.Trim()) {
+                try {
+                    # Use PSParser to split arguments string into array, respecting quotes
+                    $parsedArgs = [System.Management.Automation.PSParser]::Tokenize($arguments, [ref]$null) | Where-Object { $_.Type -eq 'String' -or $_.Type -eq 'CommandArgument' } | ForEach-Object { $_.Content }
+                    $this.Arguments = $parsedArgs
+                }
+                catch {
+                    # Fallback: just use the string as a single argument
+                    $this.Arguments = @($arguments)
+                }
+            } else {
+                $this.Arguments = @()
+            }
+        }
+        elseif ($arguments -is [array]) {
+            $this.Arguments = $arguments
+        }
+        else {
+            $this.Arguments = @()
+        }
+    }
+
+    Executable([string]$path, [string[]]$arguments) {
         $this.Path = $path
         $this.Arguments = $arguments
     }
-    
+
     [string]ToString() {
-        $commandLine = if ($this.Arguments) { "$($this.Path) $($this.Arguments)" } else { $this.Path }
-        Write-Verbose "Will try to parse command line for Executable $($this.Path)"
-        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-        $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-        $result = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-        if ($parsedCommand[1].Count -gt 0) {
-            $result += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
+        $result = Format-PathWithQuotes -Path $this.Path -ForceQuotes
+        if ($this.Arguments -and $this.Arguments.Count -gt 0) {
+            # Join arguments into a single string, quoting as needed
+            $formattedArgs = ($this.Arguments | ForEach-Object {
+                if ($_ -match '\s' -or $_ -match '[`"]') {
+                    # Quote argument if it contains spaces or quotes
+                    '"' + ($_ -replace '"', '""') + '"'
+                } else {
+                    $_
+                }
+            }) -join ' '
+            $result += " $formattedArgs"
         }
         return $result
     }
-    
+
+    static [Executable]FromCommandLine([string]$commandLine) {
+        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
+        $executablePath = if ($parsedCommand.PathItem -is [System.IO.FileInfo]) { $parsedCommand.PathItem.FullName } else { $parsedCommand.PathItem }
+        $argsArray = @()
+        if ($parsedCommand.Arguments -is [System.Collections.IEnumerable]) {
+            $argsArray = @($parsedCommand.Arguments)
+        }
+        return [Executable]::new($executablePath, $argsArray)
+    }
+
     [string]GetFileName() {
         return [System.IO.Path]::GetFileName($this.Path)
     }
-    
+
     [bool]Exists() {
         return [System.IO.File]::Exists($this.Path)
     }
@@ -720,20 +762,21 @@ function Disable-SingleScheduledTask {
     }
 }
 
-# Function to format path with quotes if needed
+# Function to format path with quotes if needed (now pipable)
 function Format-PathWithQuotes {
     <#
     .SYNOPSIS
-        Formats a path with quotes if needed for command line usage.
+        Formats a path with quotes if needed for command line usage. Now supports pipeline input.
     
     .DESCRIPTION
         Intelligently formats a path string for command line usage by adding quotes only when necessary.
         Handles various edge cases including paths with spaces, special characters, and existing quotes.
         Supports both Windows and Unix-style paths.
+        Accepts input from the pipeline or via the -Path parameter.
     
     .PARAMETER Path
         The path string to format. Can be a file path, directory path, or any string that needs
-        command line formatting.
+        command line formatting. Accepts pipeline input.
     
     .PARAMETER ForceQuotes
         Optional. Forces quotes around the path even if not strictly necessary.
@@ -753,23 +796,23 @@ function Format-PathWithQuotes {
         Returns: "C:\Program Files\App\app.exe"
     
     .EXAMPLE
-        PS> Format-PathWithQuotes "C:\App\app.exe"
+        PS> "C:\App\app.exe" | Format-PathWithQuotes
         Returns: C:\App\app.exe
     
     .EXAMPLE
-        PS> Format-PathWithQuotes "C:\App\app.exe" -ForceQuotes
+        PS> "C:\App\app.exe" | Format-PathWithQuotes -ForceQuotes
         Returns: "C:\App\app.exe"
     
     .EXAMPLE
-        PS> Format-PathWithQuotes "C:\App\app.exe" -QuoteType Single
+        PS> "C:\App\app.exe" | Format-PathWithQuotes -QuoteType Single
         Returns: 'C:\App\app.exe'
     
     .EXAMPLE
-        PS> Format-PathWithQuotes 'C:\App\app.exe "with quotes"'
+        PS> 'C:\App\app.exe "with quotes"' | Format-PathWithQuotes
         Returns: 'C:\App\app.exe "with quotes"'
     
     .EXAMPLE
-        PS> Format-PathWithQuotes ""
+        PS> "" | Format-PathWithQuotes
         Returns: ""
     
     .NOTES
@@ -778,9 +821,11 @@ function Format-PathWithQuotes {
         - Detects paths with spaces, special characters, and existing quotes
         - Supports both Windows and Unix-style path separators
         - Preserves the original path structure while ensuring command line compatibility
+        - Now pipable
     #>
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [string]$Path,
         
         [Parameter(Mandatory = $false)]
@@ -790,243 +835,233 @@ function Format-PathWithQuotes {
         [ValidateSet("Double", "Single", "Auto")]
         [string]$QuoteType = "Double"
     )
-    
-    # Handle null, empty, or whitespace-only strings
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return ""
-    }
-    
-    # Remove any existing quotes first (both single and double)
-    $cleanPath = $Path -replace '^["'']|["'']$', ''
-    
-    # Determine if quotes are needed
-    $needsQuotes = $ForceQuotes -or 
-    $cleanPath -match '\s' -or # Contains spaces
-    $cleanPath -match '["'']' -or # Contains quotes
-    $cleanPath -match '[&|<>^]' -or # Contains special command line characters
-    $cleanPath -match '^[^a-zA-Z]:' -or # Not a valid drive letter
-    $cleanPath -match '^[a-zA-Z]:[^\\]'          # Drive letter without backslash
-    
-    if (-not $needsQuotes) {
-        return $cleanPath
-    }
-    
-    # Determine quote type
-    $useDoubleQuotes = $true
-    if ($QuoteType -eq "Single") {
-        $useDoubleQuotes = $false
-    }
-    elseif ($QuoteType -eq "Auto") {
-        # Use single quotes if the path contains double quotes
-        $useDoubleQuotes = $cleanPath -notmatch '"'
-    }
-    
-    # Format with appropriate quotes
-    if ($useDoubleQuotes) {
-        return "`"$cleanPath`""
-    }
-    else {
-        return "'$cleanPath'"
+    process {
+        # Handle null, empty, or whitespace-only strings
+        if ([string]::IsNullOrWhiteSpace($Path)) {
+            return ""
+        }
+        
+        # Remove any existing quotes first (both single and double)
+        $cleanPath = $Path -replace '^["'']|["'']$', ''
+        
+        # Determine if quotes are needed
+        $needsQuotes = $ForceQuotes -or 
+        $cleanPath -match ' ' -or # Contains spaces (only actual spaces, not all whitespace)
+        $cleanPath -match '["'']' -or # Contains quotes
+        $cleanPath -match '[&|<>^]' -or # Contains special command line characters
+        $cleanPath -match '^[^a-zA-Z]:' -or # Not a valid drive letter
+        $cleanPath -match '^[a-zA-Z]:[^\\]'          # Drive letter without backslash
+        
+        if (-not $needsQuotes) {
+            return $cleanPath
+        }
+        
+        # Determine quote type
+        $useDoubleQuotes = $true
+        if ($QuoteType -eq "Single") {
+            $useDoubleQuotes = $false
+        }
+        elseif ($QuoteType -eq "Auto") {
+            # Use single quotes if the path contains double quotes
+            $useDoubleQuotes = $cleanPath -notmatch '"'
+        }
+        
+        # Format with appropriate quotes
+        if ($useDoubleQuotes) {
+            return "`"$cleanPath`""
+        }
+        else {
+            return "'$cleanPath'"
+        }
     }
 }
 
-# Function to parse command string and return path and arguments array
+# Function to parse command string and return path and arguments array (now pipable)
 function Parse-CommandLine {
     <#
     .SYNOPSIS
         Parses a command line string and returns the executable path and arguments array.
-    
+
     .DESCRIPTION
         Intelligently parses a command line string, handling quoted arguments, escaped quotes,
         and spaces within quoted strings. Returns a tuple containing the executable path (as Get-Item object or string) 
         and arguments array.
-    
+
     .PARAMETER CommandLine
         The command line string to parse (e.g., 'C:\Program Files\App\app.exe "arg with spaces" arg2')
-    
+
     .RETURNS
-        [tuple] A tuple containing:
-        - Item 0: [object] Get-Item object of the path if successful, or [string] the path if Get-Item throws an error
-        - Item 1: [string[]] Array of remaining arguments without quotes
-    
+        [pscustomobject] An object with:
+        - PathItem: [object] Get-Item object of the path if successful, or [string] the path if Get-Item throws an error
+        - Arguments: [string[]] Array of remaining arguments without quotes
+
     .EXAMPLE
-        PS> Parse-CommandLine "C:\Program Files\App\app.exe arg1 arg2"
-        Returns: (Get-Item "C:\Program Files\App\app.exe", @("arg1", "arg2"))
-    
+        PS> "C:\Program Files\App\app.exe arg1 arg2" | Parse-CommandLine
+        Returns: [pscustomobject] with PathItem and Arguments
+
     .EXAMPLE
         PS> Parse-CommandLine 'C:\App\app.exe "argument with spaces" arg2'
-        Returns: (Get-Item "C:\App\app.exe", @("argument with spaces", "arg2"))
-    
+        Returns: [pscustomobject] with PathItem and Arguments
+
     .EXAMPLE
         PS> Parse-CommandLine 'C:\App\app.exe "path with \"quotes\"" arg2'
-        Returns: (Get-Item "C:\App\app.exe", @("path with \"quotes\"", "arg2"))
-    
+        Returns: [pscustomobject] with PathItem and Arguments
+
     .NOTES
         - Throws an exception if the command line is null or empty
         - Returns Get-Item object if the path exists, otherwise returns the path as string
         - Handles escaped quotes using backslash (e.g., \")
         - Supports both single and double quoted arguments
+        - Now pipable: accepts input from pipeline or parameter
     #>
-    param([string]$CommandLine)
-    
-    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
-        throw "Command line cannot be null or empty"
-    }
-    
-    Write-Verbose "Parsing command line: '$CommandLine'"
-    
-    # Initialize variables
-    $path = ""
-    $arguments = @()
-    $currentArg = ""
-    $inQuotes = $false
-    $escapeNext = $false
-    
-    # Process each character
-    for ($i = 0; $i -lt $CommandLine.Length; $i++) {
-        $char = $CommandLine[$i]
-        
-        if ($escapeNext) {
-            $currentArg += $char
-            $escapeNext = $false
-            continue
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, Position = 0, Mandatory = $true)]
+        [string]$CommandLine
+    )
+    process {
+        if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+            throw "Command line cannot be null or empty"
         }
-        
-        if ($char -eq '\' -and $i -lt ($CommandLine.Length - 1) -and $CommandLine[$i + 1] -eq '"') {
-            $escapeNext = $true
-            continue
-        }
-        
-        if ($char -eq '"') {
-            $inQuotes = -not $inQuotes
-            continue
-        }
-        
-        if ($char -eq ' ' -and -not $inQuotes) {
-            # End of current argument
-            if ($currentArg -ne "") {
-                if ($path -eq "") {
-                    $path = $currentArg
-                }
-                else {
-                    $arguments += $currentArg
-                }
-                $currentArg = ""
-            }
-            continue
-        }
-        
-        $currentArg += $char
-    }
-    
-    # Handle the last argument
-    if ($currentArg -ne "") {
-        if ($path -eq "") {
-            $path = $currentArg
-        }
-        else {
-            $arguments += $currentArg
-        }
-    }
-    
-    Write-Verbose "Parsed path: '$path', arguments: $($arguments -join ' ')"
-    
-    # Check if path is empty after parsing
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        Write-Verbose "Path is empty after parsing, throwing error"
-        throw "Failed to parse executable path from command line: '$CommandLine'"
-    }
-    
-    # Simple approach: split by space and check if first part is already a valid path
-    # If not, keep adding parts until we find a valid path
-    $originalPath = $path
-    $originalArguments = $arguments.Clone()
-    
-    # First, try the path as-is
-    $testPath = [Environment]::ExpandEnvironmentVariables($path)
-    try {
-        $testItem = Get-Item -Path $testPath -ErrorAction Stop
-        Write-Verbose "Path is valid as-is: '$testPath'"
-    }
-    catch {
-        Write-Verbose "Path is not valid as-is: '$testPath'"
-        
-        # Parse the command line properly, respecting quoted strings
-        $parts = @()
-        $currentPart = ""
+
+        Write-Verbose "Parsing command line: '$CommandLine'"
+
+        # Initialize variables
+        $path = ""
+        $arguments = @()
+        $currentArg = ""
         $inQuotes = $false
         $escapeNext = $false
-        
+
+        # Process each character
         for ($i = 0; $i -lt $CommandLine.Length; $i++) {
             $char = $CommandLine[$i]
-            
+
             if ($escapeNext) {
-                $currentPart += $char
+                $currentArg += $char
                 $escapeNext = $false
                 continue
             }
-            
+
             if ($char -eq '\' -and $i -lt ($CommandLine.Length - 1) -and $CommandLine[$i + 1] -eq '"') {
                 $escapeNext = $true
                 continue
             }
-            
+
             if ($char -eq '"') {
                 $inQuotes = -not $inQuotes
-                $currentPart += $char
                 continue
             }
-            
+
             if ($char -eq ' ' -and -not $inQuotes) {
-                # End of current part
-                if ($currentPart -ne "") {
-                    $parts += $currentPart
-                    $currentPart = ""
-                }
-                continue
-            }
-            
-            $currentPart += $char
-        }
-        
-        # Handle the last part
-        if ($currentPart -ne "") {
-            $parts += $currentPart
-        }
-        
-        Write-Verbose "Properly parsed command line into parts: $($parts -join ' | ')"
-        
-        # If the path is not valid and we have multiple parts, try to combine them
-        # This handles the case where an unquoted path with spaces was incorrectly split
-        if ($parts.Count -gt 1) {
-            Write-Verbose "Path is not valid and we have multiple parts, trying to combine them"
-             
-            # Try combining parts until we find a valid path
-            $combinedPath = $parts[0]
-            $remainingParts = $parts[1..($parts.Count - 1)]
-             
-            foreach ($part in $remainingParts) {
-                $testPath = [Environment]::ExpandEnvironmentVariables("$combinedPath $part")
-                 
-                try {
-                    $testItem = Get-Item -Path $testPath -ErrorAction Stop
-                    Write-Verbose "Found valid path by combining: '$testPath'"
-                    $path = "$combinedPath $part"
-                    # The arguments should be the parts that come after the valid path
-                    $partIndex = $remainingParts.IndexOf($part)
-                    if ($partIndex -ge 0 -and $partIndex -lt ($remainingParts.Count - 1)) {
-                        $arguments = $remainingParts[($partIndex + 1)..($remainingParts.Count - 1)]
+                # End of current argument
+                if ($currentArg -ne "") {
+                    if ($path -eq "") {
+                        $path = $currentArg
                     }
                     else {
-                        $arguments = @()
+                        $arguments += $currentArg
                     }
-                    $foundValidPath = $true
-                    break
+                    $currentArg = ""
                 }
-                catch {
+                continue
+            }
+
+            $currentArg += $char
+        }
+
+        # Handle the last argument
+        if ($currentArg -ne "") {
+            if ($path -eq "") {
+                $path = $currentArg
+            }
+            else {
+                $arguments += $currentArg
+            }
+        }
+
+        Write-Verbose "Parsed path: '$path', arguments: $($arguments -join ' ')"
+
+        # Check if path is empty after parsing
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            Write-Verbose "Path is empty after parsing, throwing error"
+            throw "Failed to parse executable path from command line: '$CommandLine'"
+        }
+
+        # Simple approach: split by space and check if first part is already a valid path
+        # If not, keep adding parts until we find a valid path
+        $originalPath = $path
+        $originalArguments = $arguments.Clone()
+
+        # First, try the path as-is
+        $testPath = [Environment]::ExpandEnvironmentVariables($path)
+        try {
+            $testItem = Get-Item -Path $testPath -ErrorAction Stop
+            Write-Verbose "Path is valid as-is: '$testPath'"
+        }
+        catch {
+            Write-Verbose "Path is not valid as-is: '$testPath'"
+
+            # Parse the command line properly, respecting quoted strings
+            $parts = @()
+            $currentPart = ""
+            $inQuotes = $false
+            $escapeNext = $false
+
+            for ($i = 0; $i -lt $CommandLine.Length; $i++) {
+                $char = $CommandLine[$i]
+
+                if ($escapeNext) {
+                    $currentPart += $char
+                    $escapeNext = $false
+                    continue
+                }
+
+                if ($char -eq '\' -and $i -lt ($CommandLine.Length - 1) -and $CommandLine[$i + 1] -eq '"') {
+                    $escapeNext = $true
+                    continue
+                }
+
+                if ($char -eq '"') {
+                    $inQuotes = -not $inQuotes
+                    $currentPart += $char
+                    continue
+                }
+
+                if ($char -eq ' ' -and -not $inQuotes) {
+                    # End of current part
+                    if ($currentPart -ne "") {
+                        $parts += $currentPart
+                        $currentPart = ""
+                    }
+                    continue
+                }
+
+                $currentPart += $char
+            }
+
+            # Handle the last part
+            if ($currentPart -ne "") {
+                $parts += $currentPart
+            }
+
+            Write-Verbose "Properly parsed command line into parts: $($parts -join ' | ')"
+
+            # If the path is not valid and we have multiple parts, try to combine them
+            # This handles the case where an unquoted path with spaces was incorrectly split
+            if ($parts.Count -gt 1) {
+                Write-Verbose "Path is not valid and we have multiple parts, trying to combine them"
+
+                # Try combining parts until we find a valid path
+                $combinedPath = $parts[0]
+                $remainingParts = $parts[1..($parts.Count - 1)]
+
+                foreach ($part in $remainingParts) {
+                    $testPath = [Environment]::ExpandEnvironmentVariables("$combinedPath $part")
+
                     try {
-                        $commandInfo = Get-Command -Name "$combinedPath $part" -ErrorAction Stop
-                        Write-Verbose "Found executable in PATH by combining: $($commandInfo.Source)"
+                        $testItem = Get-Item -Path $testPath -ErrorAction Stop
+                        Write-Verbose "Found valid path by combining: '$testPath'"
                         $path = "$combinedPath $part"
                         # The arguments should be the parts that come after the valid path
                         $partIndex = $remainingParts.IndexOf($part)
@@ -1040,64 +1075,90 @@ function Parse-CommandLine {
                         break
                     }
                     catch {
-                        Write-Verbose "Combination not valid: '$testPath', continuing"
-                        $combinedPath = "$combinedPath $part"
+                        try {
+                            $commandInfo = Get-Command -Name "$combinedPath $part" -ErrorAction Stop
+                            Write-Verbose "Found executable in PATH by combining: $($commandInfo.Source)"
+                            $path = "$combinedPath $part"
+                            # The arguments should be the parts that come after the valid path
+                            $partIndex = $remainingParts.IndexOf($part)
+                            if ($partIndex -ge 0 -and $partIndex -lt ($remainingParts.Count - 1)) {
+                                $arguments = $remainingParts[($partIndex + 1)..($remainingParts.Count - 1)]
+                            }
+                            else {
+                                $arguments = @()
+                            }
+                            $foundValidPath = $true
+                            break
+                        }
+                        catch {
+                            Write-Verbose "Combination not valid: '$testPath', continuing"
+                            $combinedPath = "$combinedPath $part"
+                        }
                     }
                 }
+
+                # If we never found a valid path, use the original
+                if (-not $foundValidPath) {
+                    Write-Host "Could not find a valid path by combining parts, using original path: '$originalPath'" -ForegroundColor Red
+                    $path = $originalPath
+                    $arguments = $originalArguments
+                }
             }
-             
-            # If we never found a valid path, use the original
-            if (-not $foundValidPath) {
-                Write-Host "Could not find a valid path by combining parts, using original path: '$originalPath'" -ForegroundColor Red
+            else {
+                # Only one part, just use the original path
+                Write-Verbose "Path is not valid and only one part, using original path: '$originalPath'"
                 $path = $originalPath
                 $arguments = $originalArguments
             }
         }
-        else {
-            # Only one part, just use the original path
-            Write-Verbose "Path is not valid and only one part, using original path: '$originalPath'"
-            $path = $originalPath
-            $arguments = $originalArguments
+
+        # Now get the final Get-Item object for the resolved path
+        $expandedPath = [Environment]::ExpandEnvironmentVariables($path)
+
+        # Final safety check to ensure we don't pass empty path to Get-Item
+        if ([string]::IsNullOrWhiteSpace($expandedPath)) {
+            Write-Verbose "Expanded path is empty, throwing error"
+            throw "Failed to resolve executable path from command line: '$CommandLine'"
         }
-    }
-    
-    # Now get the final Get-Item object for the resolved path
-    $expandedPath = [Environment]::ExpandEnvironmentVariables($path)
-    
-    # Final safety check to ensure we don't pass empty path to Get-Item
-    if ([string]::IsNullOrWhiteSpace($expandedPath)) {
-        Write-Verbose "Expanded path is empty, throwing error"
-        throw "Failed to resolve executable path from command line: '$CommandLine'"
-    }
-    
-    try {
-        $pathItem = Get-Item -Path $expandedPath -ErrorAction Stop
-        Write-Host "Successfully parsed $($pathItem.PSIsContainer ? 'directory' : 'file'): $($pathItem.FullName) $($arguments -join ' ')" -ForegroundColor Green
-        return ($pathItem, $arguments)
-    }
-    catch {
-        Write-Verbose "Failed to get Get-Item object for '$expandedPath': $($_.Exception.Message)"
-        
-        # Try to find the executable in the system PATH
+
         try {
-            # Check if path is empty before calling Get-Command
-            if ([string]::IsNullOrWhiteSpace($path)) {
-                Write-Verbose "Path is empty, cannot search in PATH"
-                throw "Path is empty"
+            $pathItem = Get-Item -Path $expandedPath -ErrorAction Stop
+            Write-Host "Successfully parsed $($pathItem.PSIsContainer ? 'directory' : 'file'): $($pathItem.FullName) $($arguments -join ' ')" -ForegroundColor Green
+            [PSCustomObject]@{
+                PathItem  = $pathItem
+                Arguments = $arguments
             }
-            
-            $commandInfo = Get-Command -Name $path -ErrorAction Stop
-            Write-Host "Found executable in PATH: $($commandInfo.Source) $($arguments -join ' ')" -ForegroundColor Green
-            return (Get-Item -Path $commandInfo.Source), $arguments
         }
         catch {
-            Write-Verbose "Failed to find executable in PATH: $path"
-            # Return the expanded path as string if both Get-Item and Get-Command fail
-            if ([string]::IsNullOrWhiteSpace($expandedPath)) {
-                Write-Verbose "Expanded path is empty, throwing error"
-                throw "Failed to resolve executable path from command line: '$CommandLine'"
+            Write-Verbose "Failed to get Get-Item object for '$expandedPath': $($_.Exception.Message)"
+
+            # Try to find the executable in the system PATH
+            try {
+                # Check if path is empty before calling Get-Command
+                if ([string]::IsNullOrWhiteSpace($path)) {
+                    Write-Verbose "Path is empty, cannot search in PATH"
+                    throw "Path is empty"
+                }
+
+                $commandInfo = Get-Command -Name $path -ErrorAction Stop
+                Write-Host "Found executable in PATH: $($commandInfo.Source) $($arguments -join ' ')" -ForegroundColor Green
+                [PSCustomObject]@{
+                    PathItem  = (Get-Item -Path $commandInfo.Source)
+                    Arguments = $arguments
+                }
             }
-            return ($expandedPath, $arguments)
+            catch {
+                Write-Verbose "Failed to find executable in PATH: $path"
+                # Return the expanded path as string if both Get-Item and Get-Command fail
+                if ([string]::IsNullOrWhiteSpace($expandedPath)) {
+                    Write-Verbose "Expanded path is empty, throwing error"
+                    throw "Failed to resolve executable path from command line: '$CommandLine'"
+                }
+                [PSCustomObject]@{
+                    PathItem  = $expandedPath
+                    Arguments = $arguments
+                }
+            }
         }
     }
 }
@@ -1105,31 +1166,36 @@ function Parse-CommandLine {
 function Sanitize-CommandLine {
     <#
     .SYNOPSIS
-        Sanitizes a command line by converting double quotes to single quotes.
-    
+        Sanitizes a command line by converting double quotes to single quotes. Now pipable.
+
     .DESCRIPTION
         Converts all double quotes in a command line string to single quotes.
         This is useful for command line sanitization and consistency.
-    
+        Now supports pipeline input.
+
     .PARAMETER CommandLine
-        The command line string to sanitize.
-    
+        The command line string to sanitize. Accepts pipeline input.
+
     .RETURNS
         [string] The sanitized command line with single quotes instead of double quotes.
-    
+
     .EXAMPLE
         PS> Sanitize-CommandLine 'C:\App\app.exe "argument with spaces"'
+        Returns: C:\App\app.exe 'argument with spaces'
+
+    .EXAMPLE
+        PS> 'C:\App\app.exe "argument with spaces"' | Sanitize-CommandLine
         Returns: C:\App\app.exe 'argument with spaces'
     #>
     [CmdletBinding()]
     param(
-        [Parameter(ValueFromPipeline = $true, Position = 0)]
+        [Parameter(ValueFromPipeline = $true, Position = 0, Mandatory = $true)]
         [string]$CommandLine
     )
     process {
         if ($null -ne $CommandLine) {
             # Simple sanitization: replace all double quotes with single quotes
-            return $CommandLine -replace '"', "'"
+            $CommandLine -replace '"', "'"
         }
     }
 }
@@ -1245,16 +1311,10 @@ function Process-TaskXmlFileToApplicationEntry {
         
         # Set basic properties
         $app.FileName = [System.IO.Path]::GetFileName($executablePath)
-        # Use Parse-CommandLine for robust command line handling
-        $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
-        Write-Verbose "[Process-TaskXmlFileToApplicationEntry] Will try to parse command line for Task $($XmlFile.FullName) -> $($app.FileName)"
-        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-        $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-        $app.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-        if ($parsedCommand[1].Count -gt 0) {
-            $app.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-        }
-        $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -QuoteType Auto
+        # Use Executable class to handle command line formatting
+        $executable = [Executable]::new($executablePath, $arguments)
+        $app.Command = $executable.ToString()
+        $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -ForceQuotes
         
         # Set triggers - join array with commas, but only if there are triggers
         if ($taskTriggers.Count -gt 0) {
@@ -1311,8 +1371,8 @@ function Read-ExistingIniFile {
                 if ($line.StartsWith('[') -and $line.EndsWith(']')) {
                     # Save previous application if exists
                     if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                        # Fix paths in FileName, Command, and WorkingDirectory
-                        foreach ($fixKey in @("FileName", "Command", "WorkingDirectory")) {
+                        # Fix paths in Command and WorkingDirectory (FileName should not have quotes)
+                        foreach ($fixKey in @("Command", "WorkingDirectory")) {
                             if ($currentApp.ContainsKey($fixKey) -and -not [string]::IsNullOrWhiteSpace($currentApp[$fixKey])) {
                                 $currentApp[$fixKey] = Format-PathWithQuotes -Path $currentApp[$fixKey] -QuoteType Auto
                             }
@@ -1339,8 +1399,8 @@ function Read-ExistingIniFile {
                         $generalSettings[$key] = $value
                     }
                     elseif ($currentSection.StartsWith('Application')) {
-                        # Fix paths in FileName, Command, and WorkingDirectory as we read them
-                        if ($key -in @("FileName", "Command", "WorkingDirectory")) {
+                        # Fix paths in Command and WorkingDirectory as we read them (FileName should not have quotes)
+                        if ($key -in @("Command", "WorkingDirectory")) {
                             if (-not [string]::IsNullOrWhiteSpace($value)) {
                                 $value = Format-PathWithQuotes -Path $value -QuoteType Auto
                             }
@@ -1357,7 +1417,7 @@ function Read-ExistingIniFile {
             
             # Don't forget the last application
             if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                foreach ($fixKey in @("FileName", "Command", "WorkingDirectory")) {
+                foreach ($fixKey in @("Command", "WorkingDirectory")) {
                     if ($currentApp.ContainsKey($fixKey) -and -not [string]::IsNullOrWhiteSpace($currentApp[$fixKey])) {
                         $currentApp[$fixKey] = Format-PathWithQuotes -Path $currentApp[$fixKey] -QuoteType Auto
                     }
@@ -1653,16 +1713,10 @@ function Convert-StartupEntryToApplicationEntry {
         
         # Set the specific properties for this startup entry
         $entry.FileName = $executablePath
-        # Use Parse-CommandLine for robust command line handling
-        $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
-        Write-Verbose "Will try to parse command line for Startup Entry $($StartupEntry.Name)"
-        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-        $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-        $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-        if ($parsedCommand[1].Count -gt 0) {
-            $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-        }
-        $entry.WorkingDirectory = Format-PathWithQuotes -Path ([System.IO.Path]::GetDirectoryName($executablePath)) -QuoteType Auto
+        # Use Executable class to handle command line formatting
+        $executable = [Executable]::new($executablePath, $arguments)
+        $entry.Command = $executable.ToString()
+        $entry.WorkingDirectory = Format-PathWithQuotes -Path ([System.IO.Path]::GetDirectoryName($executablePath)) -ForceQuotes
         $entry.Triggers = "Logon"
         
         return $entry
@@ -1814,16 +1868,10 @@ function Load-StartupTasks {
             
                 # Set basic properties
                 $app.FileName = [System.IO.Path]::GetFileName($executablePath)
-                # Use Parse-CommandLine for robust command line handling
-                $commandLine = if ($arguments) { "$executablePath $arguments" } else { $executablePath }
-                Write-Verbose "[Load-StartupTasks] Will try to parse command line for Task $($xmlFile.FullName) -> $($app.FileName)"
-                $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-                $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-                $app.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-                if ($parsedCommand[1].Count -gt 0) {
-                    $app.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-                }
-                $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -QuoteType Auto
+                # Use Executable class to handle command line formatting
+                $executable = [Executable]::new($executablePath, $arguments)
+                $app.Command = $executable.ToString()
+                $app.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -ForceQuotes
             
                 # Set triggers
                 if ($taskTriggers.Count -gt 0) {
@@ -1916,12 +1964,10 @@ function Load-StartupScriptsFiles {
                             }
                             $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                             $entry.FileName = $scriptPath
-                            # Use Parse-CommandLine for robust command line handling
-                            Write-Verbose "[Load-StartupScriptsFiles] Will try to parse command line for Script $($scriptPath)"
-                            $parsedCommand = Parse-CommandLine -CommandLine $scriptPath
-                            $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-                            $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-                            $entry.WorkingDirectory = Format-PathWithQuotes -Path ([System.IO.Path]::GetDirectoryName($scriptPath)) -QuoteType Auto
+                            # Use Executable class to handle command line formatting
+                            $executable = [Executable]::new($scriptPath, "")
+                            $entry.Command = $executable.ToString()
+                            $entry.WorkingDirectory = Format-PathWithQuotes -Path ([System.IO.Path]::GetDirectoryName($scriptPath)) -ForceQuotes
                             $entry.Triggers = "Logon"
                             $entries += $entry
                             
@@ -1949,12 +1995,10 @@ function Load-StartupScriptsFiles {
                 
                 $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                 $entry.FileName = $file.FullName
-                # Use Parse-CommandLine for robust command line handling
-                Write-Verbose "Will try to parse command line for Startup File $($file.FullName)"
-                $parsedCommand = Parse-CommandLine -CommandLine $file.FullName
-                $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-                $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-                $entry.WorkingDirectory = Format-PathWithQuotes -Path $file.DirectoryName -QuoteType Auto
+                # Use Executable class to handle command line formatting
+                $executable = [Executable]::new($file.FullName, "")
+                $entry.Command = $executable.ToString()
+                $entry.WorkingDirectory = Format-PathWithQuotes -Path $file.DirectoryName -ForceQuotes
                 $entry.Triggers = if ($dir -like "*Startup") { "Boot" } else { "Logon" }
                 $entries += $entry
                 
@@ -2021,10 +2065,9 @@ function Load-StartupRegistry {
                     # Create entry with default settings first, then overwrite with actual values
                     $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                     $entry.FileName = $exePath
-                    $entry.Command = Format-PathWithQuotes -Path $exePath -ForceQuotes
-                    if ($parsedCommand[1].Count -gt 0) {
-                        $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-                    }
+                    # Use Executable class to handle command line formatting
+                    $executable = [Executable]::new($exePath, $arguments)
+                    $entry.Command = $executable.ToString()
                     $entry.Triggers = "Logon"
                     $entry.CrashDelay = 60
                     $entries += $entry
@@ -2108,20 +2151,14 @@ function Load-StartupFiles {
 
         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         $entry.FileName = $targetPath
-        # Use Parse-CommandLine for robust command line handling
-        $commandLine = if ($arguments) { "$targetPath $arguments" } else { $targetPath }
-        Write-Verbose "[Load-StartupFiles] Will try to parse command line for Startup File $($file.FullName)"
-        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-        $executablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-        $entry.Command = Format-PathWithQuotes -Path $executablePath -ForceQuotes
-        if ($parsedCommand[1].Count -gt 0) {
-            $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-        }
+        # Use Executable class to handle command line formatting
+        $executable = [Executable]::new($targetPath, $arguments)
+        $entry.Command = $executable.ToString()
         # Ensure working directory is not empty before formatting
         if ([string]::IsNullOrWhiteSpace($workingDir)) {
             $workingDir = [System.IO.Path]::GetDirectoryName($targetPath)
         }
-        $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDir -QuoteType Auto
+        $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDir -ForceQuotes
         $entry.Triggers = "Logon"
         $entries += $entry
         
@@ -2264,18 +2301,13 @@ function Load-StartupScriptsRegistry {
                         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                         $entry.FileName = $executablePath
                             
-                        # Parse the command line for proper formatting
-                        Write-Verbose "[Load-StartupScriptsRegistry] Will try to parse command line for Script $scriptPath"
-                        $parsedCommand = Parse-CommandLine -CommandLine $commandLine
-                        $entryExecutablePath = if ($parsedCommand[0] -is [System.IO.FileInfo]) { $parsedCommand[0].FullName } else { $parsedCommand[0] }
-                        $entry.Command = Format-PathWithQuotes -Path $entryExecutablePath -ForceQuotes
-                        if ($parsedCommand[1].Count -gt 0) {
-                            $entry.Command += " " + ($parsedCommand[1] | ForEach-Object { Format-PathWithQuotes -Path $_ -QuoteType Auto })
-                        }
+                        # Use Executable class to handle command line formatting
+                        $executable = [Executable]::new($executablePath, $parameters)
+                        $entry.Command = $executable.ToString()
                             
                         # Set working directory to script directory
                         $workingDirectory = [System.IO.Path]::GetDirectoryName($scriptPath)
-                        $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -QuoteType Auto
+                        $entry.WorkingDirectory = Format-PathWithQuotes -Path $workingDirectory -ForceQuotes
                             
                         # Set trigger based on registry path
                         if ($registryPath -like "*\Startup*") {
