@@ -828,10 +828,16 @@ function Build-Project {
                 Write-Host "Building for configuration: $config, architecture: $arch"
                 
                 # Clean up any previous build artifacts for this specific architecture
-                $archOutputPath = "bin/$config/$projectFramework/$arch/"
-                if (Test-Path $archOutputPath) {
-                    Remove-Item -Path $archOutputPath -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Host "Cleaned up previous build artifacts for $arch" -ForegroundColor Yellow
+                $cleanupPaths = @(
+                    "bin/$config/$projectFramework/$arch/",
+                    "bin/$config/$arch/",
+                    "bin/$config/"
+                )
+                foreach ($cleanupPath in $cleanupPaths) {
+                    if (Test-Path $cleanupPath) {
+                        Remove-Item -Path $cleanupPath -Recurse -Force -ErrorAction SilentlyContinue
+                        Write-Host "Cleaned up previous build artifacts in: $cleanupPath" -ForegroundColor Yellow
+                    }
                 }
                 
                 # Determine suffix based on configuration and architecture
@@ -842,10 +848,23 @@ function Build-Project {
                 
                 Write-Host "Building DLL for $config on $arch..."
                 dotnet publish -c $config -r $arch 
-                # Look specifically in the architecture-specific output directory
-                $archOutputPath = "bin/$config/$projectFramework/$arch/"
-                Write-Host "Looking for DLL in: $archOutputPath"
-                $dllPath = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+                # Look for DLL in multiple possible locations
+                $possiblePaths = @(
+                    "bin/$config/$projectFramework/$arch/",
+                    "bin/$config/$arch/",
+                    "bin/$config/"
+                )
+                $dllPath = $null
+                foreach ($path in $possiblePaths) {
+                    Write-Host "Looking for DLL in: $path"
+                    if (Test-Path $path) {
+                        $dllPath = Get-ChildItem -Path $path -Include "$outputAssemblyName.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($dllPath) {
+                            Write-Host "Found DLL at: $($dllPath.FullName)" -ForegroundColor Green
+                            break
+                        }
+                    }
+                }
                 Write-Host "Output DLL: $dllPath"
                 if ($dllPath) {
                     $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
@@ -854,6 +873,11 @@ function Build-Project {
                 }
                 else {
                     Write-Host "DLL not found after build" -ForegroundColor Red
+                    # Debug: List all files in bin directory
+                    Write-Host "Debug: Listing all files in bin/$config/ directory:"
+                    if (Test-Path "bin/$config/") {
+                        Get-ChildItem -Path "bin/$config/" -Recurse | ForEach-Object { Write-Host "  - $($_.FullName)" }
+                    }
                 }
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
@@ -865,8 +889,18 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                Write-Host "Looking for framework EXE in: $archOutputPath"
-                $outputFrameworkExe = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                # Look for framework EXE in multiple possible locations
+                $outputFrameworkExe = $null
+                foreach ($path in $possiblePaths) {
+                    Write-Host "Looking for framework EXE in: $path"
+                    if (Test-Path $path) {
+                        $outputFrameworkExe = Get-ChildItem -Path $path -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($outputFrameworkExe) {
+                            Write-Host "Found framework EXE at: $($outputFrameworkExe.FullName)" -ForegroundColor Green
+                            break
+                        }
+                    }
+                }
                 Write-Host "Output framework EXE: $outputFrameworkExe"
                 $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
                 if ($outputFrameworkExe) {
@@ -879,8 +913,18 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                Write-Host "Looking for standalone EXE in: $archOutputPath"
-                $outputStandaloneExe = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                # Look for standalone EXE in multiple possible locations
+                $outputStandaloneExe = $null
+                foreach ($path in $possiblePaths) {
+                    Write-Host "Looking for standalone EXE in: $path"
+                    if (Test-Path $path) {
+                        $outputStandaloneExe = Get-ChildItem -Path $path -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                        if ($outputStandaloneExe) {
+                            Write-Host "Found standalone EXE at: $($outputStandaloneExe.FullName)" -ForegroundColor Green
+                            break
+                        }
+                    }
+                }
                 Write-Host "Output standalone EXE: $outputStandaloneExe"
                 $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
                 if ($outputStandaloneExe) {
