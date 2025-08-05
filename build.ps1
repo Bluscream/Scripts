@@ -238,8 +238,8 @@ function Dotnet-Publish {
         [string]$Arch,
         [string]$ProjectFramework,
         [string]$AssemblyName,
-        [string]$BuildType,
-        [string[]]$AdditionalArgs = @()
+        [ValidateSet("DLL", "FrameworkExe", "StandaloneExe")]
+        [string]$BuildType
     )
     
     Write-Host "Building $BuildType for $Config on $arch..."
@@ -251,8 +251,47 @@ function Dotnet-Publish {
         "-r", $Arch
     )
     
-    # Add additional arguments
-    $publishArgs += $AdditionalArgs
+    # Add build type specific arguments
+    switch ($BuildType) {
+        "DLL" {
+            # Basic DLL build - no additional args needed
+        }
+        "FrameworkExe" {
+            $publishArgs += @("--self-contained", "false")
+        }
+        "StandaloneExe" {
+            $publishArgs += @(
+                "--self-contained", "true",
+                "/p:PublishSingleFile=true",
+                "/p:IncludeAllContentForSelfExtract=true"
+            )
+        }
+    }
+    
+    # Add release optimizations
+    if ($Config -eq "Release") {
+        $publishArgs += @(
+            "/p:OptimizeImplicitlyTriggeredBuild=true",
+            "/p:EnableCompressionInSingleFile=true",
+            "/p:DebugType=None",
+            "/p:DebugSymbols=false"
+        )
+        
+        # Additional optimizations for standalone builds
+        if ($BuildType -eq "StandaloneExe") {
+            $publishArgs += @(
+                "/p:PublishTrimmed=true",
+                "/p:TrimMode=link",
+                "/p:EnableUnsafeBinaryFormatterSerialization=false",
+                "/p:EnableUnsafeUTF7Encoding=false",
+                "/p:EventSourceSupport=false",
+                "/p:HttpActivityPropagationSupport=false",
+                "/p:InvariantGlobalization=true",
+                "/p:MetadataUpdaterSupport=false",
+                "/p:UseSystemTextJson=false"
+            )
+        }
+    }
     
     # Execute dotnet publish and capture output
     $publishOutput = dotnet $publishArgs 2>&1
@@ -1034,7 +1073,7 @@ function Build-Project {
                 dotnet clean
                 
                 # Build Framework-dependent EXE
-                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "Framework-dependent EXE" -AdditionalArgs @("--self-contained", "false")
+                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "FrameworkExe"
                 
                 # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
                 $outputFrameworkExe = $null
@@ -1061,7 +1100,7 @@ function Build-Project {
                 dotnet clean
                 
                 # Build Self-contained EXE
-                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "Self-contained EXE" -AdditionalArgs @("--self-contained", "true", "/p:PublishSingleFile=true", "/p:IncludeAllContentForSelfExtract=true")
+                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "StandaloneExe"
                 
                 # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
                 $outputStandaloneExe = $null
