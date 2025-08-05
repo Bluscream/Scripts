@@ -31,6 +31,10 @@
  .PARAMETER WriteExtra
      Include extra fields in the INI output (Triggers and GeneratorCommand). By default, these are excluded for cleaner output.
      
+ .PARAMETER NoDuplicates
+     Enable deduplication of application entries. When specified, duplicate entries based on Command property will be removed.
+     By default, all entries are kept regardless of duplicates.
+     
  .PARAMETER Ignore
      Array of patterns to ignore tasks based on their task path. Patterns are automatically wrapped with wildcards (*pattern*) and matched case-insensitively.
      Example: -Ignore "Microsoft","OneDrive","Windows"
@@ -73,6 +77,9 @@
      
  .EXAMPLE
      .\tasks-to-roc.ps1 -StartupFiles -StartupRegistry -StartupScripts -OutputPath "C:\temp\all-startup.ini"
+     
+ .EXAMPLE
+     .\tasks-to-roc.ps1 -StartupTasks -NoDuplicates -OutputPath "C:\temp\deduplicated-tasks.ini"
 #>
 
 param(
@@ -81,6 +88,7 @@ param(
     [switch]$Disable,
     [switch]$Merge,
     [switch]$WriteExtra,
+    [switch]$NoDuplicates,
     [string[]]$Ignore = @("RestartOnCrash"),
     [switch]$Tasks,
     [switch]$Files,
@@ -2308,12 +2316,14 @@ function Load-StartupScriptsRegistry {
 function Deduplicate-ApplicationEntries {
     <#
     .SYNOPSIS
-        Removes duplicate ApplicationEntry objects based on FileName and Command properties.
+        Removes duplicate ApplicationEntry objects based on Command property.
     
     .DESCRIPTION
         Processes an array of ApplicationEntry objects and removes duplicates based on:
         - Command property (exact match)
-        Also supports merge mode to check against existing applications.
+        
+        This function is called automatically when the -NoDuplicates flag is specified.
+        By default, the script keeps all entries regardless of duplicates.
     
     .PARAMETER Applications
         Array of ApplicationEntry objects to deduplicate.
@@ -2478,8 +2488,14 @@ try {
     # If no startup parameters are specified, no applications will be loaded
 
     
-    # Deduplicate application entries
-    $applications = Deduplicate-ApplicationEntries -Applications $validApplications
+    # Deduplicate application entries only if -NoDuplicates flag is specified
+    if ($NoDuplicates) {
+        Write-Host "Deduplicating application entries..." -ForegroundColor Cyan
+        $applications = Deduplicate-ApplicationEntries -Applications $validApplications
+    } else {
+        Write-Host "Keeping all application entries (including duplicates)..." -ForegroundColor Cyan
+        $applications = $validApplications
+    }
     
     # Use the full command line (including parameters) used to invoke this script for documentation
     $Script:GeneralSettings._GeneratorCommand = $global:commandLine
@@ -2530,6 +2546,12 @@ try {
     else {
         Write-Host "Successfully created INI file: $OutputPath" -ForegroundColor Green
         Write-Host "Total applications added: $($applications.Count)" -ForegroundColor Yellow
+    }
+    
+    if ($NoDuplicates) {
+        Write-Host "Deduplication was performed to remove duplicate entries." -ForegroundColor Green
+    } else {
+        Write-Host "All entries were kept (including duplicates)." -ForegroundColor Green
     }
     
 
