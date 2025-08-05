@@ -244,19 +244,19 @@ function Find-BuiltFile {
     
     # Define search paths in order of preference
     $searchPaths = @(
-        "bin/$Config/$ProjectFramework/$Arch/",
         "bin/$Config/$ProjectFramework/$Arch/publish/",
-        "bin/$Config/$Arch/",
+        "bin/$Config/$ProjectFramework/$Arch/",
         "bin/$Config/$Arch/publish/",
-        "bin/$Config/",
-        "bin/$Config/publish/"
+        "bin/$Config/$Arch/",
+        "bin/$Config/publish/",
+        "bin/$Config/"
     )
-    
-    Write-Host "Looking for $FileType in: $($searchPaths -join ', ')"
+    $filePattern = "$AssemblyName$FileExtension"
+    Write-Host "Looking for $FileType $filePattern in: $($searchPaths -join ', ')"
     
     foreach ($path in $searchPaths) {
         if (Test-Path $path) {
-            $filePattern = "$AssemblyName$FileExtension"
+            
             $foundFile = Get-ChildItem -Path $path -Include $filePattern -ErrorAction SilentlyContinue | Select-Object -First 1
             
             if ($foundFile) {
@@ -280,7 +280,7 @@ function Find-BuiltFile {
     #     Get-ChildItem -Path $publishPath | ForEach-Object { Write-Host "  - $($_.Name)" }
     # }
 
-    Write-Host "File not found" -ForegroundColor Red
+    Write-Host "$FileType $AssemblyName$FileExtension not found" -ForegroundColor Red
     
     return $null
 }
