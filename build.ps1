@@ -232,6 +232,59 @@ function Clear-BuildArtifacts {
     Write-Host "Build cleanup completed" -ForegroundColor Green
 }
 
+function Find-BuiltFile {
+    param(
+        [string]$Config,
+        [string]$Arch,
+        [string]$ProjectFramework,
+        [string]$AssemblyName,
+        [string]$FileExtension,
+        [string]$FileType = "file"
+    )
+    
+    # Define search paths in order of preference
+    $searchPaths = @(
+        "bin/$Config/$ProjectFramework/$Arch/",
+        "bin/$Config/$ProjectFramework/$Arch/publish/",
+        "bin/$Config/$Arch/",
+        "bin/$Config/$Arch/publish/",
+        "bin/$Config/",
+        "bin/$Config/publish/"
+    )
+    
+    Write-Host "Looking for $FileType in: $($searchPaths -join ', ')"
+    
+    foreach ($path in $searchPaths) {
+        if (Test-Path $path) {
+            $filePattern = "$AssemblyName$FileExtension"
+            $foundFile = Get-ChildItem -Path $path -Include $filePattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            
+            if ($foundFile) {
+                Write-Host "Found $FileType at: $($foundFile.FullName)" -ForegroundColor Green
+                return $foundFile
+            }
+        }
+    }
+    
+    # If file not found, provide debugging information
+    # Write-Host "$FileType not found" -ForegroundColor Red
+    # Write-Host "Debug: Listing all files in bin/$Config/ directory:"
+    # if (Test-Path "bin/$Config/") {
+    #     Get-ChildItem -Path "bin/$Config/" -Recurse | ForEach-Object { Write-Host "  - $($_.FullName)" }
+    # }
+    
+    # # Also check specifically in the publish directory
+    # $publishPath = "bin/$Config/$ProjectFramework/$Arch/publish/"
+    # if (Test-Path $publishPath) {
+    #     Write-Host "Debug: Listing all files in publish directory ($publishPath):"
+    #     Get-ChildItem -Path $publishPath | ForEach-Object { Write-Host "  - $($_.Name)" }
+    # }
+
+    Write-Host "File not found" -ForegroundColor Red
+    
+    return $null
+}
+
 function Commit-Git {
     Write-Host "Committing changes to git..."
 
@@ -879,45 +932,13 @@ function Build-Project {
                 
                 Write-Host "Building DLL for $config on $arch..."
                 dotnet publish -c $config -r $arch 
-                # Look for DLL in multiple possible locations
-                $possiblePaths = @(
-                    "bin/$config/$projectFramework/$arch/",
-                    "bin/$config/$projectFramework/$arch/publish/",
-                    "bin/$config/$arch/",
-                    "bin/$config/$arch/publish/",
-                    "bin/$config/",
-                    "bin/$config/publish/"
-                )
-                $dllPath = $null
-                foreach ($path in $possiblePaths) {
-                    Write-Host "Looking for DLL in: $path"
-                    if (Test-Path $path) {
-                        $dllPath = Get-ChildItem -Path $path -Include "$outputAssemblyName.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-                        if ($dllPath) {
-                            Write-Host "Found DLL at: $($dllPath.FullName)" -ForegroundColor Green
-                            break
-                        }
-                    }
-                }
-                Write-Host "Output DLL: $dllPath"
+                
+                $dllPath = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".dll" -FileType "DLL"
+                
                 if ($dllPath) {
                     $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
                     Copy-Item $dllPath.FullName $dllDest -Force
                     Write-Host "DLL built successfully: $dllDest" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "DLL not found after build" -ForegroundColor Red
-                    # Debug: List all files in bin directory
-                    Write-Host "Debug: Listing all files in bin/$config/ directory:"
-                    if (Test-Path "bin/$config/") {
-                        Get-ChildItem -Path "bin/$config/" -Recurse | ForEach-Object { Write-Host "  - $($_.FullName)" }
-                    }
-                    # Also check specifically in the publish directory
-                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
-                    if (Test-Path $publishPath) {
-                        Write-Host "Debug: Listing all files in publish directory ($publishPath):"
-                        Get-ChildItem -Path $publishPath | ForEach-Object { Write-Host "  - $($_.Name)" }
-                    }
                 }
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
@@ -929,32 +950,13 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                # Look for framework EXE in multiple possible locations
-                $outputFrameworkExe = $null
-                foreach ($path in $possiblePaths) {
-                    Write-Host "Looking for framework EXE in: $path"
-                    if (Test-Path $path) {
-                        $outputFrameworkExe = Get-ChildItem -Path $path -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-                        if ($outputFrameworkExe) {
-                            Write-Host "Found framework EXE at: $($outputFrameworkExe.FullName)" -ForegroundColor Green
-                            break
-                        }
-                    }
-                }
-                Write-Host "Output framework EXE: $outputFrameworkExe"
+                
+                $outputFrameworkExe = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "framework EXE"
+                
                 $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
                 if ($outputFrameworkExe) {
                     Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
                     Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Framework EXE not found" -ForegroundColor Red
-                    # Debug: List all .exe files in publish directory
-                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
-                    if (Test-Path $publishPath) {
-                        Write-Host "Debug: Listing all .exe files in publish directory ($publishPath):"
-                        Get-ChildItem -Path $publishPath -Filter "*.exe" | ForEach-Object { Write-Host "  - $($_.Name)" }
-                    }
                 }
                 
                 Write-Host "Building Self-contained EXE for $config on $arch..."
@@ -962,32 +964,13 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                # Look for standalone EXE in multiple possible locations
-                $outputStandaloneExe = $null
-                foreach ($path in $possiblePaths) {
-                    Write-Host "Looking for standalone EXE in: $path"
-                    if (Test-Path $path) {
-                        $outputStandaloneExe = Get-ChildItem -Path $path -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                        if ($outputStandaloneExe) {
-                            Write-Host "Found standalone EXE at: $($outputStandaloneExe.FullName)" -ForegroundColor Green
-                            break
-                        }
-                    }
-                }
-                Write-Host "Output standalone EXE: $outputStandaloneExe"
+                
+                $outputStandaloneExe = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "standalone EXE"
+                
                 $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
                 if ($outputStandaloneExe) {
                     Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
                     Write-Host "Self-contained EXE built successfully: $scExeName" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Standalone EXE not found" -ForegroundColor Red
-                    # Debug: List all .exe files in publish directory
-                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
-                    if (Test-Path $publishPath) {
-                        Write-Host "Debug: Listing all .exe files in publish directory ($publishPath):"
-                        Get-ChildItem -Path $publishPath -Filter "*.exe" | ForEach-Object { Write-Host "  - $($_.Name)" }
-                    }
                 }
                 
                 # For upload, always use the arch-suffixed names
