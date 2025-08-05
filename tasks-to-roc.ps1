@@ -344,6 +344,7 @@ class ApplicationEntry {
     [string]$Triggers
     [int]$FileNameExists
     [int]$CommandExists
+    [string]$Source
     
     ApplicationEntry() {
         $this.FileName = ""
@@ -361,6 +362,7 @@ class ApplicationEntry {
         $this.Triggers = ""
         $this.FileNameExists = 0
         $this.CommandExists = 0
+        $this.Source = ""
     }
     
     ApplicationEntry([hashtable]$settings, [hashtable]$defaults) {
@@ -381,6 +383,7 @@ class ApplicationEntry {
         $this.Triggers = $settings.Triggers ?? $defaults.Triggers
         $this.FileNameExists = $settings.FileNameExists ?? 0
         $this.CommandExists = $settings.CommandExists ?? 0
+        $this.Source = $settings.Source ?? ""
     }
     
     [hashtable]ToHashtable() {
@@ -400,6 +403,7 @@ class ApplicationEntry {
             Triggers             = $this.Triggers
             FileNameExists       = $this.FileNameExists
             CommandExists        = $this.CommandExists
+            Source               = if ($this.Source -match ' ') { "`"$($this.Source)`"" } else { $this.Source }
         }
     }
     
@@ -1311,6 +1315,7 @@ function Process-TaskXmlFileToApplicationEntry {
         
         # Set basic properties
         $app.FileName = [System.IO.Path]::GetFileName($executablePath)
+        $app.Source = "Scheduled Task: $($XmlFile.Name)"
         # Use Executable class to handle command line formatting
         $executable = [Executable]::new($executablePath, $arguments)
         $app.Command = $executable.ToString()
@@ -1350,81 +1355,58 @@ function Read-ExistingIniFile {
     $existingApplications = @()
     $generalSettings = @{}
 
-    if (Test-Path $FilePath) {
-        try {
-            $content = Get-Content $FilePath -ErrorAction Stop
-            $currentSection = ""
-            $currentApp = @{}
+    if (-not (Test-Path $FilePath)) { return @{ Applications = @(); GeneralSettings = @{} } }
+    
+    try {
+        $currentSection = ""
+        $currentApp = @{}
 
-            foreach ($line in $content) {
-                $line = $line.Trim()
-                
-                # Skip empty lines and comments
-                if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) {
-                    continue
-                }
-                
-                # Check for section headers
-                if ($line.StartsWith('[') -and $line.EndsWith(']')) {
-                    # Save previous application if exists
-                    if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                        # Fix inconsistent quoting in WorkingDirectory (don't use Format-PathWithQuotes)
-                        if ($currentApp.ContainsKey("WorkingDirectory") -and -not [string]::IsNullOrWhiteSpace($currentApp["WorkingDirectory"])) {
-                            $workingDir = $currentApp["WorkingDirectory"]
-                            # Remove existing quotes and add new ones for all paths
-                            $workingDir = $workingDir -replace '^["'']|["'']$', ''  # Remove existing quotes
-                            $workingDir = "`"$workingDir`""
-                            $currentApp["WorkingDirectory"] = $workingDir
-                        }
-                        
-                        $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
-                        $currentApp = @{}
+        foreach ($line in (Get-Content $FilePath -ErrorAction Stop)) {
+            $line = $line.Trim()
+            if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+            
+            # Section header
+            if ($line.StartsWith('[') -and $line.EndsWith(']')) {
+                # Save previous application
+                if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
+                    # Fix WorkingDirectory quoting
+                    if ($currentApp.WorkingDirectory) {
+                        $currentApp.WorkingDirectory = "`"$($currentApp.WorkingDirectory -replace '^["'']|["'']$', '')`""
                     }
-                    
-                    $currentSection = $line.Substring(1, $line.Length - 2)
-                    continue
+                    $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
+                    $currentApp = @{}
                 }
-                
-                # Parse key-value pairs
-                if ($line.Contains('=')) {
-                    $parts = $line.Split('=', 2)
-                    $key = $parts[0].Trim()
-                    $value = $parts[1].Trim()
-                    
-                    if ($currentSection -eq "general") {
-                        $generalSettings[$key] = $value
-                    }
-                    elseif ($currentSection.StartsWith('Application')) {
-                        $currentApp[$key] = $value
-                    }
-                }
+                $currentSection = $line.Substring(1, $line.Length - 2)
+                continue
             }
             
-            # Don't forget the last application
-            if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                # Fix inconsistent quoting in WorkingDirectory (don't use Format-PathWithQuotes)
-                if ($currentApp.ContainsKey("WorkingDirectory") -and -not [string]::IsNullOrWhiteSpace($currentApp["WorkingDirectory"])) {
-                    $workingDir = $currentApp["WorkingDirectory"]
-                    # Remove existing quotes and add new ones for all paths
-                    $workingDir = $workingDir -replace '^["'']|["'']$', ''  # Remove existing quotes
-                    $workingDir = "`"$workingDir`""
-                    $currentApp["WorkingDirectory"] = $workingDir
+            # Key-value pair
+            if ($line.Contains('=')) {
+                $key, $value = $line.Split('=', 2) | ForEach-Object { $_.Trim() }
+                if ($currentSection -eq "general") {
+                    $generalSettings[$key] = $value
                 }
-                
-                $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
+                elseif ($currentSection.StartsWith('Application')) {
+                    $currentApp[$key] = $value
+                }
             }
+        }
+        
+        # Handle last application
+        if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
+            if ($currentApp.WorkingDirectory) {
+                $currentApp.WorkingDirectory = "`"$($currentApp.WorkingDirectory -replace '^["'']|["'']$', '')`""
+            }
+            $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
+        }
 
-            Write-Host "Found $($existingApplications.Count) application sections in $FilePath" -ForegroundColor Gray
-        }
-        catch {
-            Write-Warning "Error reading existing INI file: $($_.Exception.Message)"
-        }
+        Write-Host "Found $($existingApplications.Count) application sections in $FilePath" -ForegroundColor Gray
+    }
+    catch {
+        Write-Warning "Error reading existing INI file: $($_.Exception.Message)"
     }
     
-    return @{
-        Applications    = $existingApplications
-        GeneralSettings = $generalSettings
-    }
+    return @{ Applications = $existingApplications; GeneralSettings = $generalSettings }
 }
 
 # Function to validate and clean up INI content
@@ -1522,8 +1504,8 @@ function Write-IniContent {
         $appHashtable = $app.ToHashtable()
         
         foreach ($key in $appHashtable.Keys | Sort-Object) {
-            # Skip Triggers field unless WriteExtra is enabled
-            if ($key -eq "Triggers" -and -not $WriteExtra) { continue }
+            # Skip Triggers and Source fields unless WriteExtra is enabled
+            if ($key -in @("Triggers", "Source", "FileNameExists", "CommandExists") -and -not $WriteExtra) { continue }
             
             $value = $appHashtable[$key]
             # The values are already properly formatted with quotes where needed
@@ -1845,6 +1827,7 @@ function Load-StartupTasks {
             
                 # Set basic properties
                 $app.FileName = [System.IO.Path]::GetFileName($executablePath)
+                $app.Source = "Scheduled Task: $($xmlFile.FullName)"
                 # Use Executable class to handle command line formatting
                 $executable = [Executable]::new($executablePath, $arguments)
                 $app.Command = $executable.ToString()
@@ -1941,6 +1924,7 @@ function Load-StartupScriptsFiles {
                             }
                             $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                             $entry.FileName = $scriptPath
+                            $entry.Source = "Script File: $scriptPath"
                             # Use Executable class to handle command line formatting
                             $executable = [Executable]::new($scriptPath, "")
                             $entry.Command = $executable.ToString()
@@ -1972,6 +1956,7 @@ function Load-StartupScriptsFiles {
                 
                 $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                 $entry.FileName = $file.FullName
+                $entry.Source = "Script File: $($file.FullName)"
                 # Use Executable class to handle command line formatting
                 $executable = [Executable]::new($file.FullName, "")
                 $entry.Command = $executable.ToString()
@@ -2042,6 +2027,7 @@ function Load-StartupRegistry {
                     # Create entry with default settings first, then overwrite with actual values
                     $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                     $entry.FileName = $exePath
+                    $entry.Source = "Registry: $key\$name"
                     # Use Executable class to handle command line formatting
                     $executable = [Executable]::new($exePath, $arguments)
                     $entry.Command = $executable.ToString()
@@ -2128,6 +2114,7 @@ function Load-StartupFiles {
 
         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         $entry.FileName = $targetPath
+        $entry.Source = "Startup File: $($file.FullName)"
         # Use Executable class to handle command line formatting
         $executable = [Executable]::new($targetPath, $arguments)
         $entry.Command = $executable.ToString()
@@ -2277,6 +2264,7 @@ function Load-StartupScriptsRegistry {
                         # Create ApplicationEntry
                         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                         $entry.FileName = $executablePath
+                        $entry.Source = "Group Policy Script: $registryPath\$($gpoKey.PSChildName)\$($scriptKey.PSChildName)"
                             
                         # Use Executable class to handle command line formatting
                         $executable = [Executable]::new($executablePath, $parameters)

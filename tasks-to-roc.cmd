@@ -1,0 +1,1 @@
+pwsh -NoProfile -ExecutionPolicy Bypass -File "tasks-to-roc.ps1" -Tasks -Files -Registry -Scripts -OutputPath "test-output-all-sources.ini" -NoElevate -WriteExtra
