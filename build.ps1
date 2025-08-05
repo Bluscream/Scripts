@@ -305,12 +305,21 @@ function Dotnet-Publish {
     # Try to extract output path from dotnet publish output
     $outputPath = $null
     
-    # Look for the publish path (last line with ->)
+    # Look for the publish path (line with -> that ends with \publish\)
     $lines = $publishOutput -split "`n"
     foreach ($line in $lines) {
-        if ($line -match ".* -> (.+)$") {
+        if ($line -match ".* -> (.+\\publish\\)$") {
             $outputPath = $matches[1].Trim()
             Write-Host "Extracted output path from $BuildType publish: $outputPath" -ForegroundColor Green
+            return $outputPath
+        }
+    }
+    
+    # Fallback: look for any line with -> that contains publish
+    foreach ($line in $lines) {
+        if ($line -match ".* -> (.+publish.+)$") {
+            $outputPath = $matches[1].Trim()
+            Write-Host "Extracted output path from $BuildType publish (fallback): $outputPath" -ForegroundColor Green
             return $outputPath
         }
     }
