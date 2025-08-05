@@ -400,10 +400,10 @@ class ApplicationEntry {
             CloseProblemReporter = $this.CloseProblemReporter
             DelayEnabled         = $this.DelayEnabled
             CrashDelay           = $this.CrashDelay
-            Triggers             = $this.Triggers
-            FileNameExists       = $this.FileNameExists
-            CommandExists        = $this.CommandExists
-            Source               = if ($this.Source -match ' ') { "`"$($this.Source)`"" } else { $this.Source }
+            _Triggers             = $this.Triggers
+            _FileNameExists       = $this.FileNameExists
+            _CommandExists        = $this.CommandExists
+            _Source               = if ($this.Source -match ' ') { "`"$($this.Source)`"" } else { $this.Source }
         }
     }
     
@@ -1477,12 +1477,14 @@ function Write-IniContent {
     # Write general section first (always on top)
     $content += "[general]"
     foreach ($key in $GeneralSettings.Keys | Sort-Object) {
-        # Skip GeneratorCommand unless WriteExtra is enabled
-        if ($key -eq "GeneratorCommand" -and -not $WriteExtra) { continue }
+        # Handle WriteExtra fields - skip if not enabled
+        if ($key -eq "_GeneratorCommand") {
+            if (-not $WriteExtra) { continue }
+        }
         
         $value = $GeneralSettings[$key]
         # Don't add extra quotes for GeneratorCommand as it already contains quotes
-        if ($key -eq "GeneratorCommand") {
+        if ($key -eq "_GeneratorCommand") {
             $content += "$key=""$value"""
         }
         else {
@@ -1504,8 +1506,10 @@ function Write-IniContent {
         $appHashtable = $app.ToHashtable()
         
         foreach ($key in $appHashtable.Keys | Sort-Object) {
-            # Skip Triggers and Source fields unless WriteExtra is enabled
-            if ($key -in @("Triggers", "Source", "FileNameExists", "CommandExists") -and -not $WriteExtra) { continue }
+            # Handle WriteExtra fields - skip if not enabled
+            if ($key -in @("_Triggers", "_Source", "_FileNameExists", "_CommandExists")) {
+                if (-not $WriteExtra) { continue }
+            }
             
             $value = $appHashtable[$key]
             # The values are already properly formatted with quotes where needed
@@ -2414,7 +2418,14 @@ function Disable-SingleStartupFile {
 
 # Main script logic
 try {
-    Set-Variable -Name "commandLine" -Value ($MyInvocation.Line | Sanitize-CommandLine) -Scope Global
+    # Get command line, handle empty case when run from .cmd file
+    $commandLine = $MyInvocation.Line
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        $commandLine = "Script executed from external source (e.g., .cmd file)"
+    } else {
+        $commandLine = $commandLine | Sanitize-CommandLine
+    }
+    Set-Variable -Name "commandLine" -Value $commandLine -Scope Global
     Write-Host "Script Command Line: $commandLine"
 
     Write-Host "Using output path: $OutputPath"
@@ -2432,6 +2443,18 @@ try {
     $validApplications = @()
 
     if ($Merge) {
+        # Create backup of existing file before merging
+        if (Test-Path $OutputPath) {
+            $backupPath = "$OutputPath.bak"
+            try {
+                Copy-Item -Path $OutputPath -Destination $backupPath -Force
+                Write-Host "Created backup: $backupPath" -ForegroundColor Green
+            }
+            catch {
+                Write-Warning "Failed to create backup: $($_.Exception.Message)"
+            }
+        }
+        
         $existingData = Read-ExistingIniFile -FilePath $OutputPath
         if ($existingData -and $existingData.Applications) {
             $validApplications += $existingData.Applications
@@ -2459,8 +2482,8 @@ try {
     $applications = Deduplicate-ApplicationEntries -Applications $validApplications
     
     # Use the full command line (including parameters) used to invoke this script for documentation
-    $Script:GeneralSettings.GeneratorCommand = $global:commandLine
-    Write-Host "GeneratorCommand: $($Script:GeneralSettings.GeneratorCommand)"
+    $Script:GeneralSettings._GeneratorCommand = $global:commandLine
+    Write-Host "GeneratorCommand: $($Script:GeneralSettings._GeneratorCommand)"
     
     # Handle merge mode - combine existing and new applications
     $finalApplications = $applications
@@ -2471,7 +2494,7 @@ try {
         
         # Use existing general settings but update GeneratorCommand
         $finalGeneralSettings = $existingData.GeneralSettings.Clone()
-        $finalGeneralSettings.GeneratorCommand = $Script:GeneralSettings.GeneratorCommand
+        $finalGeneralSettings._GeneratorCommand = $Script:GeneralSettings._GeneratorCommand
         
         # Combine existing and new applications
         $finalApplications = $existingData.Applications + $applications
