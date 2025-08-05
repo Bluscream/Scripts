@@ -884,6 +884,12 @@ function Build-Project {
                     if (Test-Path "bin/$config/") {
                         Get-ChildItem -Path "bin/$config/" -Recurse | ForEach-Object { Write-Host "  - $($_.FullName)" }
                     }
+                    # Also check specifically in the publish directory
+                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
+                    if (Test-Path $publishPath) {
+                        Write-Host "Debug: Listing all files in publish directory ($publishPath):"
+                        Get-ChildItem -Path $publishPath | ForEach-Object { Write-Host "  - $($_.Name)" }
+                    }
                 }
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
@@ -913,6 +919,15 @@ function Build-Project {
                     Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
                     Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
                 }
+                else {
+                    Write-Host "Framework EXE not found" -ForegroundColor Red
+                    # Debug: List all .exe files in publish directory
+                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
+                    if (Test-Path $publishPath) {
+                        Write-Host "Debug: Listing all .exe files in publish directory ($publishPath):"
+                        Get-ChildItem -Path $publishPath -Filter "*.exe" | ForEach-Object { Write-Host "  - $($_.Name)" }
+                    }
+                }
                 
                 Write-Host "Building Self-contained EXE for $config on $arch..."
                 dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
@@ -936,6 +951,15 @@ function Build-Project {
                 if ($outputStandaloneExe) {
                     Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
                     Write-Host "Self-contained EXE built successfully: $scExeName" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "Standalone EXE not found" -ForegroundColor Red
+                    # Debug: List all .exe files in publish directory
+                    $publishPath = "bin/$config/$projectFramework/$arch/publish/"
+                    if (Test-Path $publishPath) {
+                        Write-Host "Debug: Listing all .exe files in publish directory ($publishPath):"
+                        Get-ChildItem -Path $publishPath -Filter "*.exe" | ForEach-Object { Write-Host "  - $($_.Name)" }
+                    }
                 }
                 
                 # For upload, always use the arch-suffixed names
