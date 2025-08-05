@@ -239,10 +239,22 @@ function Dotnet-Publish {
         [string]$ProjectFramework,
         [string]$AssemblyName,
         [ValidateSet("DLL", "FrameworkExe", "StandaloneExe")]
-        [string]$BuildType
+        [string]$BuildType,
+        [switch]$Clean
     )
     
     Write-Host "Building $BuildType for $Config on $arch..."
+    
+    if ($Clean) {
+        Write-Host "Running dotnet clean..."
+        dotnet clean
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "dotnet clean completed successfully" -ForegroundColor Green
+        }
+        else {
+            Write-Host "dotnet clean completed with warnings" -ForegroundColor Yellow
+        }
+    }
     
     # Build the dotnet publish command
     $publishArgs = @(
@@ -1052,8 +1064,6 @@ function Build-Project {
                 $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
                 $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
                 $outputBinarySuffixWithConfig = ".$arch$configSuffix"
-
-                dotnet clean
                 
                 # Build DLL
                 $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "DLL"
@@ -1083,8 +1093,6 @@ function Build-Project {
                     Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
 
-                dotnet clean
-                
                 # Build Framework-dependent EXE
                 $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "FrameworkExe"
                 
@@ -1109,9 +1117,7 @@ function Build-Project {
                     Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
                     Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
                 }
-                
-                dotnet clean
-                
+                                
                 # Build Self-contained EXE
                 $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "StandaloneExe"
                 
