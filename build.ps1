@@ -232,6 +232,51 @@ function Clear-BuildArtifacts {
     Write-Host "Build cleanup completed" -ForegroundColor Green
 }
 
+function Dotnet-Publish {
+    param(
+        [string]$Config,
+        [string]$Arch,
+        [string]$ProjectFramework,
+        [string]$AssemblyName,
+        [string]$BuildType,
+        [string[]]$AdditionalArgs = @()
+    )
+    
+    Write-Host "Building $BuildType for $Config on $arch..."
+    
+    # Build the dotnet publish command
+    $publishArgs = @(
+        "publish",
+        "-c", $Config,
+        "-r", $Arch
+    )
+    
+    # Add additional arguments
+    $publishArgs += $AdditionalArgs
+    
+    # Execute dotnet publish and capture output
+    $publishOutput = dotnet $publishArgs 2>&1
+    $publishExitCode = $LASTEXITCODE
+    
+    if ($publishExitCode -ne 0) {
+        Write-Host "Error during $BuildType dotnet publish (Exit code: $publishExitCode)" -ForegroundColor Red
+        return $null
+    }
+    
+    # Try to extract output path from dotnet publish output
+    $outputPath = $null
+    if ($publishOutput -match ".* → (.+)$") {
+        $outputPath = $matches[1]
+        Write-Host "Extracted output path from $BuildType publish: $outputPath" -ForegroundColor Green
+        return $outputPath
+    }
+    else {
+        Write-Host "Could not extract output path from $BuildType publish output" -ForegroundColor Yellow
+        Write-Host "Publish output: $publishOutput"
+        return $null
+    }
+}
+
 function Find-BuiltFile {
     param(
         [string]$Config,
@@ -958,16 +1003,8 @@ function Build-Project {
 
                 dotnet clean
                 
-                Write-Host "Building DLL for $config on $arch..."
-                $publishOutput = dotnet publish -c $config -r $arch 2>&1
-                $publishExitCode = $LASTEXITCODE
-                
-                # Try to extract output path from dotnet publish output
-                $outputPath = $null
-                if ($publishOutput -match ".* → (.+)$") {
-                    $outputPath = $matches[1]
-                    Write-Host "Extracted output path from dotnet publish: $outputPath" -ForegroundColor Green
-                }
+                # Build DLL
+                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "DLL"
                 
                 # Look for DLL in the extracted path first, then fall back to Find-BuiltFile
                 $dllPath = $null
@@ -996,21 +1033,8 @@ function Build-Project {
 
                 dotnet clean
                 
-                Write-Host "Building Framework-dependent EXE for $config on $arch..."
-                # Framework-dependent build
-                $frameworkOutput = dotnet publish -c $config -r $arch --self-contained false 2>&1
-                $frameworkExitCode = $LASTEXITCODE
-                
-                if ($frameworkExitCode -ne 0) {
-                    Write-Host "Error during framework-dependent dotnet publish $frameworkExitCode" -ForegroundColor Red
-                }
-                
-                # Try to extract output path from dotnet publish output
-                $outputPath = $null
-                if ($frameworkOutput -match ".* → (.+)$") {
-                    $outputPath = $matches[1]
-                    Write-Host "Extracted output path from framework publish: $outputPath" -ForegroundColor Green
-                }
+                # Build Framework-dependent EXE
+                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "Framework-dependent EXE" -AdditionalArgs @("--self-contained", "false")
                 
                 # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
                 $outputFrameworkExe = $null
@@ -1036,20 +1060,8 @@ function Build-Project {
                 
                 dotnet clean
                 
-                Write-Host "Building Self-contained EXE for $config on $arch..."
-                $standaloneOutput = dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true 2>&1
-                $standaloneExitCode = $LASTEXITCODE
-                
-                if ($standaloneExitCode -ne 0) {
-                    Write-Host "Error during self-contained dotnet publish $standaloneExitCode" -ForegroundColor Red
-                }
-                
-                # Try to extract output path from dotnet publish output
-                $outputPath = $null
-                if ($standaloneOutput -match ".* → (.+)$") {
-                    $outputPath = $matches[1]
-                    Write-Host "Extracted output path from standalone publish: $outputPath" -ForegroundColor Green
-                }
+                # Build Self-contained EXE
+                $outputPath = Dotnet-Publish -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -BuildType "Self-contained EXE" -AdditionalArgs @("--self-contained", "true", "/p:PublishSingleFile=true", "/p:IncludeAllContentForSelfExtract=true")
                 
                 # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
                 $outputStandaloneExe = $null
