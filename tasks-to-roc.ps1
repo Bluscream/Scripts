@@ -408,10 +408,10 @@ class ApplicationEntry {
             CloseProblemReporter = $this.CloseProblemReporter
             DelayEnabled         = $this.DelayEnabled
             CrashDelay           = $this.CrashDelay
-            _Triggers             = $this.Triggers
-            _FileNameExists       = $this.FileNameExists
-            _CommandExists        = $this.CommandExists
-            _Source               = if ($this.Source -match ' ') { "`"$($this.Source)`"" } else { $this.Source }
+            Triggers             = $this.Triggers
+            FileNameExists       = $this.FileNameExists
+            CommandExists        = $this.CommandExists
+            Source               = if ($this.Source -match ' ') { "`"$($this.Source)`"" } else { $this.Source }
         }
     }
     
@@ -1381,6 +1381,7 @@ function Read-ExistingIniFile {
                     if ($currentApp.WorkingDirectory) {
                         $currentApp.WorkingDirectory = "`"$($currentApp.WorkingDirectory -replace '^["'']|["'']$', '')`""
                     }
+                    $currentApp.Source = "Merged:$FilePath"
                     $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
                     $currentApp = @{}
                 }
@@ -1392,10 +1393,16 @@ function Read-ExistingIniFile {
             if ($line.Contains('=')) {
                 $key, $value = $line.Split('=', 2) | ForEach-Object { $_.Trim() }
                 if ($currentSection -eq "general") {
+                    # Handle both old and new field names (with/without underscores)
                     $generalSettings[$key] = $value
                 }
                 elseif ($currentSection.StartsWith('Application')) {
-                    $currentApp[$key] = $value
+                    # Handle both old and new field names (with/without underscores)
+                    $normalizedKey = $key
+                    if ($key -in @("Triggers", "Source", "FileNameExists", "CommandExists")) {
+                        $normalizedKey = $key
+                    }
+                    $currentApp[$normalizedKey] = $value
                 }
             }
         }
@@ -1486,13 +1493,13 @@ function Write-IniContent {
     $content += "[general]"
     foreach ($key in $GeneralSettings.Keys | Sort-Object) {
         # Handle WriteExtra fields - skip if not enabled
-        if ($key -eq "_GeneratorCommand") {
+        if ($key -eq "GeneratorCommand") {
             if (-not $WriteExtra) { continue }
         }
         
         $value = $GeneralSettings[$key]
         # Don't add extra quotes for GeneratorCommand as it already contains quotes
-        if ($key -eq "_GeneratorCommand") {
+        if ($key -eq "GeneratorCommand") {
             $content += "$key=""$value"""
         }
         else {
@@ -1515,7 +1522,7 @@ function Write-IniContent {
         
         foreach ($key in $appHashtable.Keys | Sort-Object) {
             # Handle WriteExtra fields - skip if not enabled
-            if ($key -in @("_Triggers", "_Source", "_FileNameExists", "_CommandExists")) {
+            if ($key -in @("Triggers", "Source", "FileNameExists", "CommandExists")) {
                 if (-not $WriteExtra) { continue }
             }
             
@@ -1839,7 +1846,7 @@ function Load-StartupTasks {
             
                 # Set basic properties
                 $app.FileName = [System.IO.Path]::GetFileName($executablePath)
-                $app.Source = "Scheduled Task: $($xmlFile.FullName)"
+                $app.Source = "Scheduled Task:$($xmlFile.FullName)"
                 # Use Executable class to handle command line formatting
                 $executable = [Executable]::new($executablePath, $arguments)
                 $app.Command = $executable.ToString()
@@ -1936,7 +1943,7 @@ function Load-StartupScriptsFiles {
                             }
                             $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                             $entry.FileName = $scriptPath
-                            $entry.Source = "Script File: $scriptPath"
+                            $entry.Source = "Script File:$scriptPath"
                             # Use Executable class to handle command line formatting
                             $executable = [Executable]::new($scriptPath, "")
                             $entry.Command = $executable.ToString()
@@ -1968,7 +1975,7 @@ function Load-StartupScriptsFiles {
                 
                 $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                 $entry.FileName = $file.FullName
-                $entry.Source = "Script File: $($file.FullName)"
+                $entry.Source = "Script File:$($file.FullName)"
                 # Use Executable class to handle command line formatting
                 $executable = [Executable]::new($file.FullName, "")
                 $entry.Command = $executable.ToString()
@@ -2039,7 +2046,7 @@ function Load-StartupRegistry {
                     # Create entry with default settings first, then overwrite with actual values
                     $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                     $entry.FileName = $exePath
-                    $entry.Source = "Registry: $key\$name"
+                    $entry.Source = "Registry:$key\$name"
                     # Use Executable class to handle command line formatting
                     $executable = [Executable]::new($exePath, $arguments)
                     $entry.Command = $executable.ToString()
@@ -2126,7 +2133,7 @@ function Load-StartupFiles {
 
         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
         $entry.FileName = $targetPath
-        $entry.Source = "Startup File: $($file.FullName)"
+        $entry.Source = "Startup File:$($file.FullName)"
         # Use Executable class to handle command line formatting
         $executable = [Executable]::new($targetPath, $arguments)
         $entry.Command = $executable.ToString()
@@ -2276,7 +2283,7 @@ function Load-StartupScriptsRegistry {
                         # Create ApplicationEntry
                         $entry = [ApplicationEntry]::new(@{}, $Script:DefaultAppSettings)
                         $entry.FileName = $executablePath
-                        $entry.Source = "Group Policy Script: $registryPath\$($gpoKey.PSChildName)\$($scriptKey.PSChildName)"
+                        $entry.Source = "Group Policy Script:$registryPath\$($gpoKey.PSChildName)\$($scriptKey.PSChildName)"
                             
                         # Use Executable class to handle command line formatting
                         $executable = [Executable]::new($executablePath, $parameters)
@@ -2498,8 +2505,8 @@ try {
     }
     
     # Use the full command line (including parameters) used to invoke this script for documentation
-    $Script:GeneralSettings._GeneratorCommand = $global:commandLine
-    Write-Host "GeneratorCommand: $($Script:GeneralSettings._GeneratorCommand)"
+    $Script:GeneralSettings.GeneratorCommand = $global:commandLine
+    Write-Host "GeneratorCommand: $($Script:GeneralSettings.GeneratorCommand)"
     
     # Handle merge mode - combine existing and new applications
     $finalApplications = $applications
@@ -2510,7 +2517,7 @@ try {
         
         # Use existing general settings but update GeneratorCommand
         $finalGeneralSettings = $existingData.GeneralSettings.Clone()
-        $finalGeneralSettings._GeneratorCommand = $Script:GeneralSettings._GeneratorCommand
+        $finalGeneralSettings.GeneratorCommand = $Script:GeneralSettings.GeneratorCommand
         
         # Combine existing and new applications
         $finalApplications = $existingData.Applications + $applications
@@ -2531,6 +2538,10 @@ try {
     foreach ($app in $finalApplications) {
         $app.CleanupTriggers()
     }
+    
+    # Sort applications by filename before saving
+    Write-Host "Sorting applications by filename..." -ForegroundColor Cyan
+    $finalApplications = $finalApplications | Sort-Object -Property FileName
     
     # Write INI file using configured general settings
     Write-IniContent -FilePath $OutputPath -GeneralSettings $finalGeneralSettings -Applications $finalApplications -WriteExtra $WriteExtra
