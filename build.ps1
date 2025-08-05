@@ -182,6 +182,56 @@ function Kill-ProcessesByName {
     }
 }
 
+function Clear-BuildArtifacts {
+    param(
+        [string]$ProjectDir,
+        [string]$OutputBinDir
+    )
+    
+    Write-Host "Performing comprehensive build cleanup..." -ForegroundColor Yellow
+    
+    # Kill any running dotnet processes
+    Kill-ProcessesByName -Names @("dotnet")
+    
+    # Run dotnet clean
+    Write-Host "Running dotnet clean..."
+    dotnet clean
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "dotnet clean completed successfully" -ForegroundColor Green
+    }
+    else {
+        Write-Host "dotnet clean completed with warnings" -ForegroundColor Yellow
+    }
+    
+    # Remove bin and obj directories completely
+    $directoriesToRemove = @(
+        $OutputBinDir,
+        "$ProjectDir/obj",
+        "$ProjectDir/bin"
+    )
+    
+    foreach ($dir in $directoriesToRemove) {
+        if (Test-Path $dir) {
+            Write-Host "Removing directory: $dir"
+            Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $dir)) {
+                Write-Host "Successfully removed: $dir" -ForegroundColor Green
+            }
+            else {
+                Write-Host "Failed to remove: $dir" -ForegroundColor Red
+            }
+        }
+    }
+    
+    # Recreate the output bin directory
+    if (-not (Test-Path $OutputBinDir)) {
+        New-Item -ItemType Directory -Path $OutputBinDir -Force | Out-Null
+        Write-Host "Recreated output directory: $OutputBinDir" -ForegroundColor Green
+    }
+    
+    Write-Host "Build cleanup completed" -ForegroundColor Green
+}
+
 function Commit-Git {
     Write-Host "Committing changes to git..."
 
@@ -811,14 +861,8 @@ function Build-Project {
             Write-Host "New version: $newVersion"
         }
 
-        $processNames = @($outputAssemblyName, "dotnet")
-        Kill-ProcessesByName -Names $processNames
-
-        dotnet clean
-        # Delete bin and obj folders if they exist
-        if (Test-Path $outputBinDir) { Remove-Item -Recurse -Force $outputBinDir }
-        if (Test-Path "$projectDir/obj") { Remove-Item -Recurse -Force "$projectDir/obj" }
-        if (-not (Test-Path $outputBinDir)) { New-Item -ItemType Directory -Path $outputBinDir | Out-Null } # outputBinDir gets removed by dotnet clean
+        # Perform comprehensive cleanup before building
+        Clear-BuildArtifacts -ProjectDir $projectDir -OutputBinDir $outputBinDir
 
         $outputFrameworkExe = $null; $outputStandaloneExe = $null; $outputBinPath = $null
         
@@ -826,22 +870,6 @@ function Build-Project {
         foreach ($config in $buildConfigs) {
             foreach ($arch in $architectures) {
                 Write-Host "Building for configuration: $config, architecture: $arch"
-                
-                # Clean up any previous build artifacts for this specific architecture
-                $cleanupPaths = @(
-                    "bin/$config/$projectFramework/$arch/",
-                    "bin/$config/$projectFramework/$arch/publish/",
-                    "bin/$config/$arch/",
-                    "bin/$config/$arch/publish/",
-                    "bin/$config/",
-                    "bin/$config/publish/"
-                )
-                foreach ($cleanupPath in $cleanupPaths) {
-                    if (Test-Path $cleanupPath) {
-                        Remove-Item -Path $cleanupPath -Recurse -Force -ErrorAction SilentlyContinue
-                        Write-Host "Cleaned up previous build artifacts in: $cleanupPath" -ForegroundColor Yellow
-                    }
-                }
                 
                 # Determine suffix based on configuration and architecture
                 $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
