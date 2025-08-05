@@ -31,4 +31,5 @@
 ::
 ::
 ::978f952a14a936cc963da21a135fa983
-banner.exe --message "%*" --title Voicemeeter
+start /min banner.exe --message "%*"
+exit /b
