@@ -288,7 +288,7 @@ function Dotnet-Publish {
                 "/p:HttpActivityPropagationSupport=false",
                 "/p:InvariantGlobalization=true",
                 "/p:MetadataUpdaterSupport=false",
-                "/p:UseSystemTextJson=false"
+                # "/p:UseSystemTextJson=false"
             )
         }
     }
