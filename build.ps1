@@ -239,26 +239,35 @@ function Find-BuiltFile {
         [string]$ProjectFramework,
         [string]$AssemblyName,
         [string]$FileExtension,
-        [string]$FileType = "file"
+        [string]$FileType = "file",
+        [bool]$IsPublish = $false
     )
-    
-    # Define search paths in order of preference
-    $searchPaths = @(
-        "bin/$Config/$ProjectFramework/$Arch/publish/",
-        "bin/$Config/$ProjectFramework/$Arch/",
-        "bin/$Config/$Arch/publish/",
-        "bin/$Config/$Arch/",
-        "bin/$Config/publish/",
-        "bin/$Config/"
-    )
+    $searchPaths = @()
+    # Adjust search paths based on $IsPublish
+    if ($IsPublish) {
+        $searchPaths = @(
+            "bin/$Config/$ProjectFramework/$Arch/publish/",
+            "bin/$Config/$Arch/publish/",
+            "bin/$Config/publish/",
+            "bin/"
+        )
+    } else {
+        $searchPaths = @(
+            "bin/$Config/$ProjectFramework/$Arch/",
+            "bin/$Config/$Arch/",
+            "bin/$Config/",
+            "bin/"
+        )
+    }
+
     $filePattern = "$AssemblyName$FileExtension"
-    Write-Host "Looking for $FileType $filePattern in: $($searchPaths -join ', ')"
-    
+    Write-Host "Looking for $FileType $filePattern (IsPublish: $IsPublish)"
+
     foreach ($path in $searchPaths) {
-        if (Test-Path $path) {
-            
-            $foundFile = Get-ChildItem -Path $path -Include $filePattern -ErrorAction SilentlyContinue | Select-Object -First 1
-            
+        $fullPath = Join-Path $ProjectDir $path $AssemblyName$FileExtension
+        Write-Host "Searching path: $fullPath"
+        if (Test-Path $fullPath) {
+            $foundFile = Get-Item $fullPath
             if ($foundFile) {
                 Write-Host "Found $FileType at: $($foundFile.FullName)" -ForegroundColor Green
                 return $foundFile
@@ -551,7 +560,24 @@ function Publish-GitHubRelease {
     
     Write-Host "Found $($assets.Count) assets to upload:"
     foreach ($asset in $assets) {
-        Write-Host "  - $($asset.Name) ($($asset.FullName))"
+        $sizeMB = [Math]::Round($asset.Length / 1MB, 2)
+        try {
+            $hash = (Get-FileHash -Path $asset.FullName -Algorithm MD5).Hash
+        } catch {
+            $hash = "N/A"
+        }
+        # Generate a color from the MD5 hash (use first 6 hex digits, map to ConsoleColor)
+        $colorMap = @(
+            'Black','DarkBlue','DarkGreen','DarkCyan','DarkRed','DarkMagenta','DarkYellow','Gray',
+            'DarkGray','Blue','Green','Cyan','Red','Magenta','Yellow','White'
+        )
+        if ($hash -ne "N/A") {
+            $colorIndex = [Convert]::ToInt32($hash.Substring(0,2),16) % $colorMap.Count
+            $color = $colorMap[$colorIndex]
+        } else {
+            $color = "Gray"
+        }
+        Write-Host ("  - {0} [{1} MB] (MD5: {2})" -f $asset.Name, $sizeMB, $hash) -ForegroundColor $color
     }
     
     if ($assets.Count -eq 0) {
@@ -929,11 +955,35 @@ function Build-Project {
                 $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
                 $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
                 $outputBinarySuffixWithConfig = ".$arch$configSuffix"
+
+                dotnet clean
                 
                 Write-Host "Building DLL for $config on $arch..."
-                dotnet publish -c $config -r $arch 
+                $publishOutput = dotnet publish -c $config -r $arch 2>&1
+                $publishExitCode = $LASTEXITCODE
                 
-                $dllPath = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".dll" -FileType "DLL"
+                # Try to extract output path from dotnet publish output
+                $outputPath = $null
+                if ($publishOutput -match ".* → (.+)$") {
+                    $outputPath = $matches[1]
+                    Write-Host "Extracted output path from dotnet publish: $outputPath" -ForegroundColor Green
+                }
+                
+                # Look for DLL in the extracted path first, then fall back to Find-BuiltFile
+                $dllPath = $null
+                if ($outputPath -and (Test-Path $outputPath)) {
+                    $dllFile = Join-Path $outputPath "$outputAssemblyName.dll"
+                    if (Test-Path $dllFile) {
+                        $dllPath = Get-Item $dllFile
+                        Write-Host "Found DLL in extracted path: $($dllPath.FullName)" -ForegroundColor Green
+                    }
+                }
+                
+                # Fall back to Find-BuiltFile if we couldn't find it in the extracted path
+                if (-not $dllPath) {
+                    Write-Host "Falling back to Find-BuiltFile for DLL..." -ForegroundColor Yellow
+                    $dllPath = Find-BuiltFile -IsPublish:$true -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".dll" -FileType "DLL"
+                }
                 
                 if ($dllPath) {
                     $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
@@ -943,15 +993,40 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
+
+                dotnet clean
                 
                 Write-Host "Building Framework-dependent EXE for $config on $arch..."
                 # Framework-dependent build
-                dotnet publish -c $config -r $arch --self-contained false
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+                $frameworkOutput = dotnet publish -c $config -r $arch --self-contained false 2>&1
+                $frameworkExitCode = $LASTEXITCODE
+                
+                if ($frameworkExitCode -ne 0) {
+                    Write-Host "Error during framework-dependent dotnet publish $frameworkExitCode" -ForegroundColor Red
                 }
                 
-                $outputFrameworkExe = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "framework EXE"
+                # Try to extract output path from dotnet publish output
+                $outputPath = $null
+                if ($frameworkOutput -match ".* → (.+)$") {
+                    $outputPath = $matches[1]
+                    Write-Host "Extracted output path from framework publish: $outputPath" -ForegroundColor Green
+                }
+                
+                # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
+                $outputFrameworkExe = $null
+                if ($outputPath -and (Test-Path $outputPath)) {
+                    $exeFile = Join-Path $outputPath "$outputAssemblyName.exe"
+                    if (Test-Path $exeFile) {
+                        $outputFrameworkExe = Get-Item $exeFile
+                        Write-Host "Found framework EXE in extracted path: $($outputFrameworkExe.FullName)" -ForegroundColor Green
+                    }
+                }
+                
+                # Fall back to Find-BuiltFile if we couldn't find it in the extracted path
+                if (-not $outputFrameworkExe) {
+                    Write-Host "Falling back to Find-BuiltFile for framework EXE..." -ForegroundColor Yellow
+                    $outputFrameworkExe = Find-BuiltFile -IsPublish:$true -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "framework EXE"
+                }
                 
                 $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
                 if ($outputFrameworkExe) {
@@ -959,13 +1034,38 @@ function Build-Project {
                     Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
                 }
                 
+                dotnet clean
+                
                 Write-Host "Building Self-contained EXE for $config on $arch..."
-                dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+                $standaloneOutput = dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true 2>&1
+                $standaloneExitCode = $LASTEXITCODE
+                
+                if ($standaloneExitCode -ne 0) {
+                    Write-Host "Error during self-contained dotnet publish $standaloneExitCode" -ForegroundColor Red
                 }
                 
-                $outputStandaloneExe = Find-BuiltFile -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "standalone EXE"
+                # Try to extract output path from dotnet publish output
+                $outputPath = $null
+                if ($standaloneOutput -match ".* → (.+)$") {
+                    $outputPath = $matches[1]
+                    Write-Host "Extracted output path from standalone publish: $outputPath" -ForegroundColor Green
+                }
+                
+                # Look for EXE in the extracted path first, then fall back to Find-BuiltFile
+                $outputStandaloneExe = $null
+                if ($outputPath -and (Test-Path $outputPath)) {
+                    $exeFile = Join-Path $outputPath "$outputAssemblyName.exe"
+                    if (Test-Path $exeFile) {
+                        $outputStandaloneExe = Get-Item $exeFile
+                        Write-Host "Found standalone EXE in extracted path: $($outputStandaloneExe.FullName)" -ForegroundColor Green
+                    }
+                }
+                
+                # Fall back to Find-BuiltFile if we couldn't find it in the extracted path
+                if (-not $outputStandaloneExe) {
+                    Write-Host "Falling back to Find-BuiltFile for standalone EXE..." -ForegroundColor Yellow
+                    $outputStandaloneExe = Find-BuiltFile -IsPublish:$true -Config $config -Arch $arch -ProjectFramework $projectFramework -AssemblyName $outputAssemblyName -FileExtension ".exe" -FileType "standalone EXE"
+                }
                 
                 $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
                 if ($outputStandaloneExe) {
