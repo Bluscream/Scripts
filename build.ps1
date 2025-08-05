@@ -3,7 +3,7 @@
 
 param(
     [string]$Version = "",
-    [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
+    [string[]]$Arch = @("win-x64", "win-x86"),
     [switch]$Release,
     [switch]$Debug,
     [switch]$Git,
@@ -675,7 +675,7 @@ function Publish-GHCR {
 function Build-Project {
     param(
         [string]$Version = "",
-        [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
+        [string[]]$Arch = @("win-x64", "win-x86"),
         [switch]$Release,
         [switch]$Debug,
         [switch]$Git,
@@ -741,7 +741,7 @@ function Build-Project {
             $architectures = $projectRIDsNode.RuntimeIdentifiers -split ';'
         }
         else {
-            $architectures = @('win-x64', 'linux-x64', 'osx-x64')
+            $architectures = @('win-x64', 'win-x86')
         }
         Write-Host "Building for architectures: $($architectures -join ', ')"
 
@@ -827,6 +827,13 @@ function Build-Project {
             foreach ($arch in $architectures) {
                 Write-Host "Building for configuration: $config, architecture: $arch"
                 
+                # Clean up any previous build artifacts for this specific architecture
+                $archOutputPath = "bin/$config/$projectFramework/$arch/"
+                if (Test-Path $archOutputPath) {
+                    Remove-Item -Path $archOutputPath -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "Cleaned up previous build artifacts for $arch" -ForegroundColor Yellow
+                }
+                
                 # Determine suffix based on configuration and architecture
                 $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
                 $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
@@ -835,7 +842,10 @@ function Build-Project {
                 
                 Write-Host "Building DLL for $config on $arch..."
                 dotnet publish -c $config -r $arch 
-                $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
+                # Look specifically in the architecture-specific output directory
+                $archOutputPath = "bin/$config/$projectFramework/$arch/"
+                Write-Host "Looking for DLL in: $archOutputPath"
+                $dllPath = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
                 Write-Host "Output DLL: $dllPath"
                 if ($dllPath) {
                     $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
@@ -855,7 +865,8 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+                Write-Host "Looking for framework EXE in: $archOutputPath"
+                $outputFrameworkExe = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
                 Write-Host "Output framework EXE: $outputFrameworkExe"
                 $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
                 if ($outputFrameworkExe) {
@@ -868,7 +879,8 @@ function Build-Project {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
                 }
-                $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                Write-Host "Looking for standalone EXE in: $archOutputPath"
+                $outputStandaloneExe = Get-ChildItem -Path $archOutputPath -Include "$outputAssemblyName.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 Write-Host "Output standalone EXE: $outputStandaloneExe"
                 $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
                 if ($outputStandaloneExe) {
@@ -907,7 +919,7 @@ function Build-Project {
 function Publish-Project {
     param(
         [string]$Version = "",
-        [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
+        [string[]]$Arch = @("win-x64", "win-x86"),
         [switch]$Nuget,
         [switch]$Github,
         [switch]$Git,
