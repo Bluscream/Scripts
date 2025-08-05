@@ -287,7 +287,7 @@ function Dotnet-Publish {
                 "/p:EventSourceSupport=false",
                 "/p:HttpActivityPropagationSupport=false",
                 "/p:InvariantGlobalization=true",
-                "/p:MetadataUpdaterSupport=false",
+                "/p:MetadataUpdaterSupport=false"
                 # "/p:UseSystemTextJson=false"
             )
         }
@@ -304,16 +304,20 @@ function Dotnet-Publish {
     
     # Try to extract output path from dotnet publish output
     $outputPath = $null
-    if ($publishOutput -match ".* → (.+)$") {
-        $outputPath = $matches[1]
-        Write-Host "Extracted output path from $BuildType publish: $outputPath" -ForegroundColor Green
-        return $outputPath
+    
+    # Look for the publish path (last line with ->)
+    $lines = $publishOutput -split "`n"
+    foreach ($line in $lines) {
+        if ($line -match ".* -> (.+)$") {
+            $outputPath = $matches[1].Trim()
+            Write-Host "Extracted output path from $BuildType publish: $outputPath" -ForegroundColor Green
+            return $outputPath
+        }
     }
-    else {
-        Write-Host "Could not extract output path from $BuildType publish output" -ForegroundColor Yellow
-        Write-Host "Publish output: $publishOutput"
-        return $null
-    }
+    
+    Write-Host "Could not extract output path from $BuildType publish output" -ForegroundColor Yellow
+    Write-Host "Publish output: $publishOutput"
+    return $null
 }
 
 function Find-BuiltFile {
