@@ -1343,21 +1343,18 @@ function Process-TaskXmlFileToApplicationEntry {
     }
 }
 
-# Function to read existing INI file and extract FileNames
+# Function to read existing INI file and extract applications
 function Read-ExistingIniFile {
     param([string]$FilePath)
     
-    $existingFileNames = @()
     $existingApplications = @()
     $generalSettings = @{}
-    $sectionFileNames = @{} # Hashtable to map section name to FileName
 
     if (Test-Path $FilePath) {
         try {
             $content = Get-Content $FilePath -ErrorAction Stop
             $currentSection = ""
             $currentApp = @{}
-            $currentSectionName = ""
 
             foreach ($line in $content) {
                 $line = $line.Trim()
@@ -1371,17 +1368,16 @@ function Read-ExistingIniFile {
                 if ($line.StartsWith('[') -and $line.EndsWith(']')) {
                     # Save previous application if exists
                     if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                        # Fix paths in Command and WorkingDirectory (FileName should not have quotes)
-                        foreach ($fixKey in @("Command", "WorkingDirectory")) {
-                            if ($currentApp.ContainsKey($fixKey) -and -not [string]::IsNullOrWhiteSpace($currentApp[$fixKey])) {
-                                $currentApp[$fixKey] = Format-PathWithQuotes -Path $currentApp[$fixKey] -QuoteType Auto
-                            }
+                        # Fix inconsistent quoting in WorkingDirectory (don't use Format-PathWithQuotes)
+                        if ($currentApp.ContainsKey("WorkingDirectory") -and -not [string]::IsNullOrWhiteSpace($currentApp["WorkingDirectory"])) {
+                            $workingDir = $currentApp["WorkingDirectory"]
+                            # Remove existing quotes and add new ones for all paths
+                            $workingDir = $workingDir -replace '^["'']|["'']$', ''  # Remove existing quotes
+                            $workingDir = "`"$workingDir`""
+                            $currentApp["WorkingDirectory"] = $workingDir
                         }
+                        
                         $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
-                        # Save section name and FileName if present
-                        if ($currentApp.ContainsKey("FileName") -and -not [string]::IsNullOrWhiteSpace($currentApp["FileName"])) {
-                            $sectionFileNames[$currentSection] = $currentApp["FileName"]
-                        }
                         $currentApp = @{}
                     }
                     
@@ -1399,44 +1395,26 @@ function Read-ExistingIniFile {
                         $generalSettings[$key] = $value
                     }
                     elseif ($currentSection.StartsWith('Application')) {
-                        # Fix paths in Command and WorkingDirectory as we read them (FileName should not have quotes)
-                        if ($key -in @("Command", "WorkingDirectory")) {
-                            if (-not [string]::IsNullOrWhiteSpace($value)) {
-                                $value = Format-PathWithQuotes -Path $value -QuoteType Auto
-                            }
-                        }
                         $currentApp[$key] = $value
-                        
-                        # Collect FileNames for duplicate checking
-                        if ($key -eq "FileName" -and -not [string]::IsNullOrWhiteSpace($value)) {
-                            $existingFileNames += $value
-                        }
                     }
                 }
             }
             
             # Don't forget the last application
             if ($currentSection.StartsWith('Application') -and $currentApp.Count -gt 0) {
-                foreach ($fixKey in @("Command", "WorkingDirectory")) {
-                    if ($currentApp.ContainsKey($fixKey) -and -not [string]::IsNullOrWhiteSpace($currentApp[$fixKey])) {
-                        $currentApp[$fixKey] = Format-PathWithQuotes -Path $currentApp[$fixKey] -QuoteType Auto
-                    }
+                # Fix inconsistent quoting in WorkingDirectory (don't use Format-PathWithQuotes)
+                if ($currentApp.ContainsKey("WorkingDirectory") -and -not [string]::IsNullOrWhiteSpace($currentApp["WorkingDirectory"])) {
+                    $workingDir = $currentApp["WorkingDirectory"]
+                    # Remove existing quotes and add new ones for all paths
+                    $workingDir = $workingDir -replace '^["'']|["'']$', ''  # Remove existing quotes
+                    $workingDir = "`"$workingDir`""
+                    $currentApp["WorkingDirectory"] = $workingDir
                 }
+                
                 $existingApplications += [ApplicationEntry]::new($currentApp, $Script:DefaultAppSettings)
-                if ($currentApp.ContainsKey("FileName") -and -not [string]::IsNullOrWhiteSpace($currentApp["FileName"])) {
-                    $sectionFileNames[$currentSection] = $currentApp["FileName"]
-                }
             }
 
-            # Print amount of sections and each "SectionName -> FileName" combination
-            $sectionCount = $sectionFileNames.Keys.Count
-            Write-Host "Found $sectionCount application sections in $FilePath" -ForegroundColor Gray
-            if ($Verbose) {
-                foreach ($section in $sectionFileNames.Keys) {
-                    $fileName = $sectionFileNames[$section]
-                    Write-Verbose "$section -> $fileName"
-                }
-            }
+            Write-Host "Found $($existingApplications.Count) application sections in $FilePath" -ForegroundColor Gray
         }
         catch {
             Write-Warning "Error reading existing INI file: $($_.Exception.Message)"
@@ -1444,7 +1422,6 @@ function Read-ExistingIniFile {
     }
     
     return @{
-        FileNames       = $existingFileNames
         Applications    = $existingApplications
         GeneralSettings = $generalSettings
     }
@@ -2468,7 +2445,7 @@ try {
 
     if ($Merge) {
         $existingData = Read-ExistingIniFile -FilePath $OutputPath
-        if ($existingData -and $existingData.FileNames) {
+        if ($existingData -and $existingData.Applications) {
             $validApplications += $existingData.Applications
         }
     }
