@@ -829,8 +829,11 @@ function Build-Project {
                 
                 # Clean up any previous build artifacts for this specific architecture
                 $cleanupPaths = @(
+                    "bin/$config/$projectFramework/$arch/publish/",
                     "bin/$config/$projectFramework/$arch/",
+                    "bin/$config/$arch/publish/",
                     "bin/$config/$arch/",
+                    "bin/$config/publish/",
                     "bin/$config/"
                 )
                 foreach ($cleanupPath in $cleanupPaths) {
@@ -850,8 +853,11 @@ function Build-Project {
                 dotnet publish -c $config -r $arch 
                 # Look for DLL in multiple possible locations
                 $possiblePaths = @(
+                    "bin/$config/$projectFramework/$arch/publish/",
                     "bin/$config/$projectFramework/$arch/",
+                    "bin/$config/$arch/publish/",
                     "bin/$config/$arch/",
+                    "bin/$config/publish/",
                     "bin/$config/"
                 )
                 $dllPath = $null
