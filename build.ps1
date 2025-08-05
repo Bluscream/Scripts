@@ -1180,6 +1180,12 @@ function Publish-Project {
     
     )
     
+    Write-Host "Publish-Project function called with:" -ForegroundColor Cyan
+    Write-Host "  Github: $Github" -ForegroundColor Cyan
+    Write-Host "  Repo: '$Repo'" -ForegroundColor Cyan
+    Write-Host "  Release: $Release" -ForegroundColor Cyan
+    Write-Host "  Debug: $Debug" -ForegroundColor Cyan
+    
     $ErrorActionPreference = 'Stop'
     
     # Get project info for publishing
@@ -1217,8 +1223,14 @@ function Publish-Project {
     
     # Publish to GitHub Releases
     if ($Github) {
+        Write-Host "Publishing to GitHub Releases..." -ForegroundColor Cyan
         $githubSuccess = Publish-GitHubRelease -projectName $projectName -newVersion $newVersion -outputBinDir $outputBinDir -repo $Repo
-        if (-not $githubSuccess) { $publishSuccess = $false }
+        if (-not $githubSuccess) { 
+            Write-Host "GitHub publishing failed!" -ForegroundColor Red
+            $publishSuccess = $false 
+        } else {
+            Write-Host "GitHub publishing completed successfully!" -ForegroundColor Green
+        }
     }
     
     # Publish to NuGet
@@ -1274,5 +1286,12 @@ if (-not $buildSuccess) {
 
 # Then optionally publish
 if ($Publish) {
-    Publish-Project -Version $Version -Arch $Arch -Nuget:$Nuget -Github:$Github -Git:$Git -Repo $Repo -Release:$Release -Debug:$Debug -Docker:$Docker -Ghcr:$Ghcr
+    Write-Host "Starting publishing phase..." -ForegroundColor Cyan
+    $publishResult = Publish-Project -Version $Version -Arch $Arch -Nuget:$Nuget -Github:$Github -Git:$Git -Repo $Repo -Release:$Release -Debug:$Debug -Docker:$Docker -Ghcr:$Ghcr
+    if ($publishResult) {
+        Write-Host "Publishing completed successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "Publishing failed!" -ForegroundColor Red
+        exit 1
+    }
 }
