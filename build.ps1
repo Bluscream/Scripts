@@ -3,7 +3,7 @@
 
 param(
     [string]$Version = "",
-    [string]$Arch = "win-x64",
+    [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
     [switch]$Release,
     [switch]$Debug,
     [switch]$Git,
@@ -675,7 +675,7 @@ function Publish-GHCR {
 function Build-Project {
     param(
         [string]$Version = "",
-        [string]$Arch = "win-x64",
+        [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
         [switch]$Release,
         [switch]$Debug,
         [switch]$Git,
@@ -729,20 +729,21 @@ function Build-Project {
         }
         Write-Host "Project framework: $projectFramework"
 
-        # Determine architecture
-        if ($Arch) {
-            $arch = $Arch
+        # Determine architectures to build for
+        $architectures = @()
+        if ($Arch -and $Arch.Count -gt 0) {
+            $architectures = $Arch
         }
         elseif ($projectRIDNode -and $projectRIDNode.RuntimeIdentifier) {
-            $arch = $projectRIDNode.RuntimeIdentifier
+            $architectures = @($projectRIDNode.RuntimeIdentifier)
         }
         elseif ($projectRIDsNode -and $projectRIDsNode.RuntimeIdentifiers) {
-            $arch = ($projectRIDsNode.RuntimeIdentifiers -split ';')[0]
+            $architectures = $projectRIDsNode.RuntimeIdentifiers -split ';'
         }
         else {
-            $arch = 'win-x64'
+            $architectures = @('win-x64', 'linux-x64', 'osx-x64')
         }
-        Write-Host "Using architecture: $arch"
+        Write-Host "Building for architectures: $($architectures -join ', ')"
 
         # Determine build configurations
         $buildConfigs = @()
@@ -821,65 +822,67 @@ function Build-Project {
 
         $outputFrameworkExe = $null; $outputStandaloneExe = $null; $outputBinPath = $null
         
-        # Build for each configuration
+        # Build for each configuration and architecture combination
         foreach ($config in $buildConfigs) {
-            Write-Host "Building for configuration: $config"
-            
-            # Determine suffix based on configuration
-            $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
-            $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
-            $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
-            $outputBinarySuffixWithConfig = ".$arch$configSuffix"
-            
-            Write-Host "Building DLL for $config..."
-            dotnet publish -c $config -r $arch 
-            $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
-            Write-Host "Output DLL: $dllPath"
-            if ($dllPath) {
-                $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
-                Copy-Item $dllPath.FullName $dllDest -Force
-                Write-Host "DLL built successfully: $dllDest" -ForegroundColor Green
-            }
-            else {
-                Write-Host "DLL not found after build" -ForegroundColor Red
-            }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-            }
-            
-            Write-Host "Building Framework-dependent EXE for $config..."
-            # Framework-dependent build
-            dotnet publish -c $config -r $arch --self-contained false
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-            }
-            $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
-            Write-Host "Output framework EXE: $outputFrameworkExe"
-            $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
-            if ($outputFrameworkExe) {
-                Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
-                Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
-            }
-            
-            Write-Host "Building Self-contained EXE for $config..."
-            dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
-            }
-            $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            Write-Host "Output standalone EXE: $outputStandaloneExe"
-            $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
-            if ($outputStandaloneExe) {
-                Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
-                Write-Host "Self-contained EXE built successfully: $scExeName" -ForegroundColor Green
-            }
-            
-            # For upload, always use the arch-suffixed names
-            if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
-                $outputBinPath = Join-Path $outputBinDir $fwExeName
-            }
-            elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
-                $outputBinPath = Join-Path $outputBinDir $scExeName
+            foreach ($arch in $architectures) {
+                Write-Host "Building for configuration: $config, architecture: $arch"
+                
+                # Determine suffix based on configuration and architecture
+                $configSuffix = if ($config -eq "Release") { ".release" } else { ".debug" }
+                $outputFrameworkSuffixWithConfig = ".$projectFramework.$arch$configSuffix.exe"
+                $outputSelfcontainedSuffixWithConfig = ".standalone.$arch$configSuffix.exe"
+                $outputBinarySuffixWithConfig = ".$arch$configSuffix"
+                
+                Write-Host "Building DLL for $config on $arch..."
+                dotnet publish -c $config -r $arch 
+                $dllPath = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.dll" -Recurse | Select-Object -First 1
+                Write-Host "Output DLL: $dllPath"
+                if ($dllPath) {
+                    $dllDest = Join-Path $outputBinDir "$outputAssemblyName$outputBinarySuffixWithConfig.dll"
+                    Copy-Item $dllPath.FullName $dllDest -Force
+                    Write-Host "DLL built successfully: $dllDest" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "DLL not found after build" -ForegroundColor Red
+                }
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error during dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+                }
+                
+                Write-Host "Building Framework-dependent EXE for $config on $arch..."
+                # Framework-dependent build
+                dotnet publish -c $config -r $arch --self-contained false
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error during framework-dependent dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+                }
+                $outputFrameworkExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Select-Object -First 1
+                Write-Host "Output framework EXE: $outputFrameworkExe"
+                $fwExeName = "$outputAssemblyName$outputFrameworkSuffixWithConfig"
+                if ($outputFrameworkExe) {
+                    Copy-Item $outputFrameworkExe.FullName (Join-Path $outputBinDir $fwExeName) -Force
+                    Write-Host "Framework-dependent EXE built successfully: $fwExeName" -ForegroundColor Green
+                }
+                
+                Write-Host "Building Self-contained EXE for $config on $arch..."
+                dotnet publish -c $config -r $arch --self-contained true /p:PublishSingleFile=true /p:IncludeAllContentForSelfExtract=true
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error during self-contained dotnet publish $($LASTEXITCODE)" -ForegroundColor Red
+                }
+                $outputStandaloneExe = Get-ChildItem -Path "bin/$config/" -Include "$outputAssemblyName.exe" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                Write-Host "Output standalone EXE: $outputStandaloneExe"
+                $scExeName = "$outputAssemblyName$outputSelfcontainedSuffixWithConfig"
+                if ($outputStandaloneExe) {
+                    Copy-Item $outputStandaloneExe.FullName (Join-Path $outputBinDir $scExeName) -Force
+                    Write-Host "Self-contained EXE built successfully: $scExeName" -ForegroundColor Green
+                }
+                
+                # For upload, always use the arch-suffixed names
+                if (Test-Path (Join-Path $outputBinDir $fwExeName)) {
+                    $outputBinPath = Join-Path $outputBinDir $fwExeName
+                }
+                elseif (Test-Path (Join-Path $outputBinDir $scExeName)) {
+                    $outputBinPath = Join-Path $outputBinDir $scExeName
+                }
             }
         }
 
@@ -904,7 +907,7 @@ function Build-Project {
 function Publish-Project {
     param(
         [string]$Version = "",
-        [string]$Arch = "win-x64",
+        [string[]]$Arch = @("win-x64", "linux-x64", "osx-x64", "linux-arm64", "osx-arm64"),
         [switch]$Nuget,
         [switch]$Github,
         [switch]$Git,
@@ -988,7 +991,7 @@ function Publish-Project {
 # Main execution logic
 Write-Host "Debug - Parameters received:"
 Write-Host "  Version: '$Version'"
-Write-Host "  Arch: '$Arch'"
+Write-Host "  Arch: $($Arch -join ', ')"
 Write-Host "  Release: $Release"
 Write-Host "  Debug: $Debug"
 Write-Host "  Git: $Git"
