@@ -11,6 +11,46 @@
         },
         {
           "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Local\\VRCOSC\\VRCOSC.bat"
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\UntrustedUrlsReset\\disable_untrusted_urls.ps1",
+          "Enabled": true
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\LocalPlayerModerationsReset\\start.bat",
+          "Enabled": true
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\vrc-log\\start.bat",
+          "Enabled": true
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\AdGoBye\\start.bat",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\LocalPlayerModerationsReset\\clean.bat",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\FewTags\\start.bat",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Roaming\\VRCX\\startup\\_DISABLED\\hmdq.cmd",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "C:\\Program Files (x86)\\SlimeVR Server\\slimevr.exe",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Local\\VRCOSC\\current\\VRCOSC.exe",
+          "Enabled": false
+        },
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\YoinkerDetector\\start.bat",
+          "Enabled": false
         }
       ]
     },
