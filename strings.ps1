@@ -3,8 +3,18 @@ param(
     [string[]]$Paths,
     
     [Parameter(Mandatory = $false)]
-    [switch]$CommandLine
+    [switch]$CommandLine,
+    
+    [Parameter(Mandatory = $false)]
+    [int]$MinLength = 4,
+    
+    [Parameter(Mandatory = $false)]
+    [int]$MaxLength = 255
 )
+
+# Define regex patterns for command-line filtering (in main scope for display)
+$commandLineRegex = '^[/-]'
+$commandLineAllowedCharsRegex = '^[a-zA-Z0-9/_:=@-]+$'
 
 # Function to write colored output
 function Write-ColorOutput {
@@ -26,8 +36,14 @@ function Extract-Strings {
     param(
         [string]$FilePath,
         [string]$OutputPath,
-        [bool]$CommandLineOnly = $false
+        [bool]$CommandLineOnly = $false,
+        [int]$MinLength = 4,
+        [int]$MaxLength = 255
     )
+    
+    # Define regex patterns for command-line filtering
+    $commandLineRegex = '^[/-]'
+    $commandLineAllowedCharsRegex = '^[a-zA-Z0-9/_:=@-]+$'
     
     try {
         # Create output directory if it doesn't exist
@@ -41,19 +57,22 @@ function Extract-Strings {
         
         if ($stringsExe) {
             # Use strings.exe with common options
-            $result = & strings.exe -n 4 -a $FilePath 2>$null
+            $result = & strings.exe -n $MinLength -a $FilePath 2>$null
             if ($result) {
                 if ($CommandLineOnly) {
-                    # Filter for command-line strings (starting with / or - and 3-255 chars, only alphanumeric + / and -)
+                    # Filter for command-line strings (starting with / or - and MinLength-MaxLength chars, only alphanumeric + /, -, :, =, @)
                     $result = $result | Where-Object { 
-                        $_ -match '^[/-]' -and $_.Length -ge 3 -and $_.Length -le 255 -and $_ -match '^[a-zA-Z0-9/_-]+$'
+                        $_ -match $commandLineRegex -and $_ -match $commandLineAllowedCharsRegex
                     }
+                }
+                $result = $result | Where-Object { 
+                    $_.Length -ge $MinLength -and $_.Length -le $MaxLength
                 }
                 
                 # Sort strings alphabetically and remove duplicates
                 $result = $result | Sort-Object -Unique
                 $result | Out-File -FilePath $OutputPath -Encoding UTF8
-                Write-ColorOutput "✓ Extracted strings from: $FilePath" "Green"
+                Write-ColorOutput "✓ Extracted $($result.Count) strings from: $FilePath" "Green"
                 return $true
             }
         }
@@ -69,37 +88,43 @@ function Extract-Strings {
                         $currentString += [char]$byte
                     }
                     else {
-                        if ($currentString.Length -ge 4) {
+                        if ($currentString.Length -ge $MinLength) {
                             $strings += $currentString
                         }
                         $currentString = ""
                     }
                 }
                 
-                if ($currentString.Length -ge 4) {
+                if ($currentString.Length -ge $MinLength) {
                     $strings += $currentString
                 }
                 
                 if ($strings.Count -gt 0) {
                     if ($CommandLineOnly) {
-                        # Filter for command-line strings (starting with / or - and 3-255 chars, only alphanumeric + / and -)
+                        # Filter for command-line strings (starting with / or - and MinLength-MaxLength chars, only alphanumeric + /, -, :, =, @)
                         $filteredStrings = $strings | Where-Object { 
-                            $_ -match '^[/-]' -and $_.Length -ge 3 -and $_.Length -le 255 -and $_ -match '^[a-zA-Z0-9/_-]+$'
+                            $_ -match $commandLineRegex -and $_.Length -ge $MinLength -and $_.Length -le $MaxLength -and $_ -match $commandLineAllowedCharsRegex
                         }
                         if ($filteredStrings.Count -gt 0) {
                             # Sort strings alphabetically and remove duplicates
                             $filteredStrings = $filteredStrings | Sort-Object -Unique
                             $filteredStrings | Out-File -FilePath $OutputPath -Encoding UTF8
-                            Write-ColorOutput "✓ Extracted command-line strings from: $FilePath" "Green"
+                            Write-ColorOutput "✓ Extracted $($filteredStrings.Count) command-line strings from: $FilePath" "Green"
                             return $true
                         }
                     }
                     else {
-                        # Sort strings alphabetically and remove duplicates
-                        $strings = $strings | Sort-Object -Unique
-                        $strings | Out-File -FilePath $OutputPath -Encoding UTF8
-                        Write-ColorOutput "✓ Extracted strings from: $FilePath" "Green"
-                        return $true
+                        # Filter by length for regular mode
+                        $filteredStrings = $strings | Where-Object { 
+                            $_.Length -ge $MinLength -and $_.Length -le $MaxLength
+                        }
+                        if ($filteredStrings.Count -gt 0) {
+                            # Sort strings alphabetically and remove duplicates
+                            $filteredStrings = $filteredStrings | Sort-Object -Unique
+                            $filteredStrings | Out-File -FilePath $OutputPath -Encoding UTF8
+                            Write-ColorOutput "✓ Extracted $($filteredStrings.Count) strings from: $FilePath" "Green"
+                            return $true
+                        }
                     }
                 }
             }
@@ -119,9 +144,13 @@ function Extract-Strings {
 
 # Main script logic
 try {
+    
     Write-ColorOutput "Starting string extraction process..." "Cyan"
     if ($CommandLine) {
-        Write-ColorOutput "Command-line mode enabled - filtering for strings starting with / or - (3-255 chars, alphanumeric + / and - only)" "Yellow"
+        Write-ColorOutput "Command-line mode enabled - filtering for strings matching regex: $commandLineRegex and allowed chars: $commandLineAllowedCharsRegex ($MinLength-$MaxLength chars)" "Yellow"
+    }
+    else {
+        Write-ColorOutput "Length filtering enabled - strings between $MinLength and $MaxLength characters" "Yellow"
     }
     
     # Create base output directory
@@ -144,7 +173,7 @@ try {
                     $safeFileName = Get-SafeFileName $fileInfo.FullName
                     $outputPath = Join-Path $baseOutputDir "$safeFileName.strings.txt"
                     
-                    if (Extract-Strings -FilePath $fileInfo.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine) {
+                    if (Extract-Strings -FilePath $fileInfo.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine -MinLength $MinLength -MaxLength $MaxLength) {
                         $successfulExtractions++
                     }
                 }
@@ -164,7 +193,7 @@ try {
                     $safeFileName = Get-SafeFileName $relativePath
                     $outputPath = Join-Path $baseOutputDir "$safeFileName.strings.txt"
                     
-                    if (Extract-Strings -FilePath $file.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine) {
+                    if (Extract-Strings -FilePath $file.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine -MinLength $MinLength -MaxLength $MaxLength) {
                         $successfulExtractions++
                     }
                 }
