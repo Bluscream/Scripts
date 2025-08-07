@@ -360,7 +360,8 @@ function Find-BuiltFile {
             "bin/$Config/publish/",
             "bin/"
         )
-    } else {
+    }
+    else {
         $searchPaths = @(
             "bin/$Config/$ProjectFramework/$Arch/",
             "bin/$Config/$Arch/",
@@ -373,7 +374,7 @@ function Find-BuiltFile {
     Write-Host "Looking for $FileType $filePattern (IsPublish: $IsPublish)"
 
     foreach ($path in $searchPaths) {
-        $fullPath = Join-Path $ProjectDir $path $AssemblyName$FileExtension
+        $fullPath = Join-Path (Join-Path $ProjectDir $path) "$AssemblyName$FileExtension"
         Write-Host "Searching path: $fullPath"
         if (Test-Path $fullPath) {
             $foundFile = Get-Item $fullPath
@@ -472,6 +473,128 @@ function Push-Git {
     }
 }
 
+function Start-DockerIfNeeded {
+    Write-Host "Checking Docker status..."
+    
+    # Check if Docker daemon is accessible
+    try {
+        docker info --format "{{.ServerVersion}}" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Docker daemon is running" -ForegroundColor Green
+            return $true
+        }
+    }
+    catch {
+        Write-Host "Docker daemon not accessible" -ForegroundColor Yellow
+    }
+    
+    Write-Host "Docker daemon not running. Checking Docker service..." -ForegroundColor Yellow
+    
+    # Check and start Docker Windows service if needed
+    try {
+        $dockerService = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+        if ($dockerService) {
+            if ($dockerService.Status -ne "Running") {
+                Write-Host "Starting Docker service (com.docker.service)..." -ForegroundColor Yellow
+                Start-Service -Name "com.docker.service" -ErrorAction Stop
+                Write-Host "Docker service started successfully" -ForegroundColor Green
+                
+                # Wait a moment for the service to fully start
+                Start-Sleep -Seconds 3
+                
+                # Check if Docker daemon is now accessible
+                try {
+                    docker info --format "{{.ServerVersion}}" 2>$null | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "Docker daemon is now running after service start" -ForegroundColor Green
+                        return $true
+                    }
+                }
+                catch {
+                    Write-Host "Docker daemon still not accessible after service start" -ForegroundColor Yellow
+                }
+            }
+            else {
+                Write-Host "Docker service is already running" -ForegroundColor Green
+            }
+        }
+        else {
+            Write-Host "Docker service (com.docker.service) not found" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "Failed to manage Docker service: $_" -ForegroundColor Yellow
+    }
+    
+    Write-Host "Attempting to start Docker Desktop..." -ForegroundColor Yellow
+    
+    # Try to start Docker Desktop application
+    $dockerDesktopPaths = @(
+        "${env:ProgramFiles}\Docker\Docker\Docker Desktop.exe",
+        "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+        "${env:LOCALAPPDATA}\Programs\Docker\Docker\Docker Desktop.exe"
+    )
+    
+    $dockerStarted = $false
+    foreach ($path in $dockerDesktopPaths) {
+        if (Test-Path $path) {
+            Write-Host "Starting Docker Desktop from: $path"
+            try {
+                Start-Process -FilePath $path -ErrorAction Stop
+                $dockerStarted = $true
+                break
+            }
+            catch {
+                Write-Host "Failed to start Docker Desktop from $path : $_" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    if (-not $dockerStarted) {
+        Write-Host "Could not find Docker Desktop executable. Trying to start via Start-Process..." -ForegroundColor Yellow
+        try {
+            Start-Process "Docker Desktop" -ErrorAction Stop
+            $dockerStarted = $true
+        }
+        catch {
+            Write-Host "Failed to start Docker Desktop: $_" -ForegroundColor Yellow
+        }
+    }
+    
+    if ($dockerStarted) {
+        Write-Host "Docker Desktop starting... waiting for daemon to be ready..." -ForegroundColor Yellow
+        
+        # Wait for Docker daemon to be ready (up to 60 seconds)
+        $maxWaitTime = 60
+        $waitTime = 0
+        $interval = 2
+        
+        while ($waitTime -lt $maxWaitTime) {
+            Start-Sleep -Seconds $interval
+            $waitTime += $interval
+            
+            try {
+                docker info --format "{{.ServerVersion}}" 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "Docker daemon is now ready!" -ForegroundColor Green
+                    return $true
+                }
+            }
+            catch {
+                # Continue waiting
+            }
+            
+            Write-Host "Still waiting for Docker daemon... ($waitTime/$maxWaitTime seconds)" -ForegroundColor Yellow
+        }
+        
+        Write-Host "Docker daemon did not start within $maxWaitTime seconds" -ForegroundColor Red
+        return $false
+    }
+    
+    Write-Host "Failed to start Docker Desktop" -ForegroundColor Red
+    return $false
+}
+
 function Build-DockerImages {
     param(
         [string]$projectDir,
@@ -482,6 +605,12 @@ function Build-DockerImages {
     )
     
     Write-Host "Building Docker images..."
+    
+    # Ensure Docker is running before proceeding
+    if (-not (Start-DockerIfNeeded)) {
+        Write-Host "Docker is not available. Skipping Docker image builds." -ForegroundColor Red
+        return
+    }
     
     # Get GitHub username for the source label
     $githubUsername = Get-Username -Service "github"
@@ -672,18 +801,20 @@ function Publish-GitHubRelease {
         $sizeMB = [Math]::Round($asset.Length / 1MB, 2)
         try {
             $hash = (Get-FileHash -Path $asset.FullName -Algorithm MD5).Hash
-        } catch {
+        }
+        catch {
             $hash = "N/A"
         }
         # Generate a color from the MD5 hash (use first 6 hex digits, map to ConsoleColor)
         $colorMap = @(
-            'Black','DarkBlue','DarkGreen','DarkCyan','DarkRed','DarkMagenta','DarkYellow','Gray',
-            'DarkGray','Blue','Green','Cyan','Red','Magenta','Yellow','White'
+            'Black', 'DarkBlue', 'DarkGreen', 'DarkCyan', 'DarkRed', 'DarkMagenta', 'DarkYellow', 'Gray',
+            'DarkGray', 'Blue', 'Green', 'Cyan', 'Red', 'Magenta', 'Yellow', 'White'
         )
         if ($hash -ne "N/A") {
-            $colorIndex = [Convert]::ToInt32($hash.Substring(0,2),16) % $colorMap.Count
+            $colorIndex = [Convert]::ToInt32($hash.Substring(0, 2), 16) % $colorMap.Count
             $color = $colorMap[$colorIndex]
-        } else {
+        }
+        else {
             $color = "Gray"
         }
         Write-Host ("  - {0} [{1} MB] (MD5: {2})" -f $asset.Name, $sizeMB, $hash) -ForegroundColor $color
@@ -798,6 +929,12 @@ function Publish-DockerHub {
     
     Write-Host "Publishing to Docker Hub..."
     
+    # Ensure Docker is running before proceeding
+    if (-not (Start-DockerIfNeeded)) {
+        Write-Host "Docker is not available. Skipping Docker Hub publishing." -ForegroundColor Red
+        return $false
+    }
+    
     # Get Docker username
     $dockerUsername = Get-Username -Service "docker"
     if (-not $dockerUsername) {
@@ -857,6 +994,12 @@ function Publish-GHCR {
     )
     
     Write-Host "Publishing to GitHub Container Registry (GHCR)..."
+    
+    # Ensure Docker is running before proceeding
+    if (-not (Start-DockerIfNeeded)) {
+        Write-Host "Docker is not available. Skipping GHCR publishing." -ForegroundColor Red
+        return $false
+    }
     
     # Get GitHub username
     $githubUsername = Get-Username -Service "GitHub"
@@ -1234,7 +1377,8 @@ function Publish-Project {
         if (-not $githubSuccess) { 
             Write-Host "GitHub publishing failed!" -ForegroundColor Red
             $publishSuccess = $false 
-        } else {
+        }
+        else {
             Write-Host "GitHub publishing completed successfully!" -ForegroundColor Green
         }
     }
@@ -1296,7 +1440,8 @@ if ($Publish) {
     $publishResult = Publish-Project -Version $Version -Arch $Arch -Nuget:$Nuget -Github:$Github -Git:$Git -Repo $Repo -Release:$Release -Debug:$Debug -Docker:$Docker -Ghcr:$Ghcr
     if ($publishResult) {
         Write-Host "Publishing completed successfully!" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "Publishing failed!" -ForegroundColor Red
         exit 1
     }

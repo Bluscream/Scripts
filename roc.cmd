@@ -1,0 +1,1 @@
+schtasks /change /tn "blu\startup\RestartOnCrash" /enable && schtasks /run /tn "blu\startup\RestartOnCrash"

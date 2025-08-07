@@ -10,22 +10,23 @@
           "KeepRunning": true
         },
         {
-          "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Local\\VRCOSC\\VRCOSC.bat"
-        },
-        {
           "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\UntrustedUrlsReset\\disable_untrusted_urls.ps1",
           "Enabled": true
         },
         {
-          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\LocalPlayerModerationsReset\\start.bat",
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\LocalPlayerModerationsReset\\hooligan.exe",
           "Enabled": true
         },
         {
-          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\vrc-log\\start.bat",
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\vrc-log\\vrc-log.exe",
+          "Arguments": [],
+          "EnvironmentVariables": {
+            "AVTRDB_ATTRIBUTION": "blu"
+          },
           "Enabled": true
         },
         {
-          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\AdGoBye\\start.bat",
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\AdGoBye\\AdGoBye.exe",
           "Enabled": false
         },
         {
@@ -33,10 +34,7 @@
           "Enabled": false
         },
         {
-          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\FewTags\\start.bat",
-          "Enabled": false
-        },
-        {
+          "KeepRunning": false,
           "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Roaming\\VRCX\\startup\\_DISABLED\\hmdq.cmd",
           "Enabled": false
         },
@@ -47,9 +45,19 @@
         {
           "ProgramPath": "C:\\Users\\Bluscream\\AppData\\Local\\VRCOSC\\current\\VRCOSC.exe",
           "Enabled": false
+        }
+      ]
+    },
+    {
+      "ProcessName": "VRCX",
+      "GracePeriod": "00:00:30",
+      "SubPrograms": [
+        {
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\FewTags\\FewTags VRCX.exe",
+          "Enabled": false
         },
         {
-          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\YoinkerDetector\\start.bat",
+          "ProgramPath": "D:\\OneDrive\\Games\\VRChat\\_TOOLS\\VRCX\\_TOOLS\\YoinkerDetector\\StandaloneNotifier.exe",
           "Enabled": false
         }
       ]
