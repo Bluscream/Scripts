@@ -9,7 +9,10 @@ param(
     [int]$MinLength = 4,
     
     [Parameter(Mandatory = $false)]
-    [int]$MaxLength = 255
+    [int]$MaxLength = 255,
+    
+    [Parameter(Mandatory = $false)]
+    [int]$Threads = 4
 )
 
 # Define regex patterns for command-line filtering (in main scope for display)
@@ -83,6 +86,8 @@ function Extract-Strings {
         [int]$MaxLength = 255
     )
     
+
+    
     try {
         # Create output directory if it doesn't exist
         $outputDir = Split-Path $OutputPath -Parent
@@ -143,6 +148,89 @@ function Extract-Strings {
     }
 }
 
+# Function to process a single file
+function Process-SingleFile {
+    param(
+        [string]$FilePath,
+        [string]$OutputPath,
+        [bool]$CommandLineOnly,
+        [int]$MinLength,
+        [int]$MaxLength
+    )
+    
+    try {
+        return Extract-Strings -FilePath $FilePath -OutputPath $OutputPath -CommandLineOnly $CommandLineOnly -MinLength $MinLength -MaxLength $MaxLength
+    }
+    catch {
+        Write-ColorOutput "✗ Error processing: $FilePath - $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# Function to process files in parallel using PowerShell 7+ ForEach-Object -Parallel
+function Process-FilesParallel {
+    param(
+        [array]$Files,
+        [string]$BaseOutputDir,
+        [bool]$CommandLineOnly,
+        [int]$MinLength,
+        [int]$MaxLength,
+        [int]$Threads = 4
+    )
+    
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        Write-ColorOutput "Using PowerShell 7+ parallel processing with $Threads concurrent jobs..." "Cyan"
+        
+        $results = $Files | ForEach-Object -ThrottleLimit $Threads -Parallel {
+            $file = $_
+            $baseOutputDir = $using:BaseOutputDir
+            $commandLineOnly = $using:CommandLineOnly
+            $minLength = $using:MinLength
+            $maxLength = $using:MaxLength
+            
+            $relativePath = $file.FullName.Substring($using:Paths[0].Length).TrimStart('\')
+            $safeFileName = $relativePath -replace '[\\/:*?"<>|]', '_'
+            $outputPath = Join-Path $baseOutputDir "$safeFileName.strings.txt"
+            
+            # Simple string extraction without complex function imports
+            try {
+                $stringsExe = Get-Command strings.exe -ErrorAction SilentlyContinue
+                if ($stringsExe) {
+                    $result = & strings.exe -n $minLength -a $file.FullName 2>$null
+                    if ($result) {
+                        if ($commandLineOnly) {
+                            $result = $result | Where-Object { 
+                                $_ -match '^[/-]' -and $_.Length -ge $minLength -and $_.Length -le $maxLength -and $_ -match '^[a-zA-Z0-9/_:=@-]+$'
+                            }
+                        }
+                        else {
+                            $result = $result | Where-Object { 
+                                $_.Length -ge $minLength -and $_.Length -le $maxLength
+                            }
+                        }
+                        
+                        if ($result.Count -gt 0) {
+                            $result = $result | Sort-Object -Unique
+                            $result | Out-File -FilePath $outputPath -Encoding UTF8
+                            return $true
+                        }
+                    }
+                }
+                return $false
+            }
+            catch {
+                return $false
+            }
+        }
+        
+        return ($results | Where-Object { $_ -eq $true }).Count
+    }
+    else {
+        Write-ColorOutput "PowerShell 7+ required for parallel processing. Falling back to sequential processing." "Yellow"
+        return 0
+    }
+}
+
 # Main script logic
 try {
     
@@ -190,14 +278,23 @@ try {
 
                 Write-ColorOutput "Found $($exeFiles.Count) executable files" "Cyan"
                 
-                foreach ($file in $exeFiles) {
-                    $processedFiles++
-                    $relativePath = $file.FullName.Substring($path.Length).TrimStart('\')
-                    $safeFileName = Get-SafeFileName $relativePath
-                    $outputPath = Join-Path $baseOutputDir "$safeFileName.strings.txt"
-                    
-                    if (Extract-Strings -FilePath $file.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine -MinLength $MinLength -MaxLength $MaxLength) {
-                        $successfulExtractions++
+                if ($exeFiles.Count -gt 1 -and $Threads -gt 1) {
+                    # Use parallel processing for multiple files
+                    $successfulCount = Process-FilesParallel -Files $exeFiles -BaseOutputDir $baseOutputDir -CommandLineOnly $CommandLine -MinLength $MinLength -MaxLength $MaxLength -MaxConcurrency $Threads
+                    $processedFiles += $exeFiles.Count
+                    $successfulExtractions += $successfulCount
+                }
+                else {
+                    # Process files sequentially
+                    foreach ($file in $exeFiles) {
+                        $processedFiles++
+                        $relativePath = $file.FullName.Substring($path.Length).TrimStart('\')
+                        $safeFileName = Get-SafeFileName $relativePath
+                        $outputPath = Join-Path $baseOutputDir "$safeFileName.strings.txt"
+                        
+                        if (Extract-Strings -FilePath $file.FullName -OutputPath $outputPath -CommandLineOnly $CommandLine -MinLength $MinLength -MaxLength $MaxLength) {
+                            $successfulExtractions++
+                        }
                     }
                 }
             }
