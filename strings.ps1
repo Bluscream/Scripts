@@ -13,8 +13,8 @@ param(
 )
 
 # Define regex patterns for command-line filtering (in main scope for display)
-$commandLineRegex = '^[/-]'
-$commandLineAllowedCharsRegex = '^[a-zA-Z0-9/_:=@-]+$'
+Set-Variable -Name commandLineRegex -Value '^[/-]' -Scope Script
+Set-Variable -Name commandLineAllowedCharsRegex -Value '^[a-zA-Z0-9/_:=@-]+$' -Scope Script
 
 # Function to write colored output
 function Write-ColorOutput {
@@ -31,6 +31,48 @@ function Get-SafeFileName {
     return $Path -replace '[\\/:*?"<>|]', '_'
 }
 
+# Function to filter strings based on criteria
+function Filter-Strings {
+    param(
+        [string[]]$Strings,
+        [bool]$CommandLineOnly = $false,
+        [int]$MinLength = 4,
+        [int]$MaxLength = 255
+    )
+    
+    if ($CommandLineOnly) {
+        return $Strings | Where-Object { 
+            $_ -match $CommandLineRegex -and $_.Length -ge $MinLength -and $_.Length -le $MaxLength -and $_ -match $CommandLineAllowedCharsRegex
+        }
+    }
+    else {
+        return $Strings | Where-Object { 
+            $_.Length -ge $MinLength -and $_.Length -le $MaxLength
+        }
+    }
+}
+
+# Function to save strings to file
+function Save-StringsToFile {
+    param(
+        [string[]]$Strings,
+        [string]$OutputPath,
+        [string]$FilePath,
+        [bool]$CommandLineOnly = $false
+    )
+    
+    if ($Strings.Count -gt 0) {
+        # Sort strings alphabetically and remove duplicates
+        $sortedStrings = $Strings | Sort-Object -Unique
+        $sortedStrings | Out-File -FilePath $OutputPath -Encoding UTF8
+        
+        $mode = if ($CommandLineOnly) { "command-line" } else { "" }
+        Write-ColorOutput "✓ Extracted $($sortedStrings.Count) $mode strings from: $FilePath" "Green"
+        return $true
+    }
+    return $false
+}
+
 # Function to extract strings from a file
 function Extract-Strings {
     param(
@@ -40,10 +82,6 @@ function Extract-Strings {
         [int]$MinLength = 4,
         [int]$MaxLength = 255
     )
-    
-    # Define regex patterns for command-line filtering
-    $commandLineRegex = '^[/-]'
-    $commandLineAllowedCharsRegex = '^[a-zA-Z0-9/_:=@-]+$'
     
     try {
         # Create output directory if it doesn't exist
@@ -59,21 +97,8 @@ function Extract-Strings {
             # Use strings.exe with common options
             $result = & strings.exe -n $MinLength -a $FilePath 2>$null
             if ($result) {
-                if ($CommandLineOnly) {
-                    # Filter for command-line strings (starting with / or - and MinLength-MaxLength chars, only alphanumeric + /, -, :, =, @)
-                    $result = $result | Where-Object { 
-                        $_ -match $commandLineRegex -and $_ -match $commandLineAllowedCharsRegex
-                    }
-                }
-                $result = $result | Where-Object { 
-                    $_.Length -ge $MinLength -and $_.Length -le $MaxLength
-                }
-                
-                # Sort strings alphabetically and remove duplicates
-                $result = $result | Sort-Object -Unique
-                $result | Out-File -FilePath $OutputPath -Encoding UTF8
-                Write-ColorOutput "✓ Extracted $($result.Count) strings from: $FilePath" "Green"
-                return $true
+                $filteredStrings = Filter-Strings -Strings $result -CommandLineOnly $CommandLineOnly -MinLength $MinLength -MaxLength $MaxLength
+                return Save-StringsToFile -Strings $filteredStrings -OutputPath $OutputPath -FilePath $FilePath -CommandLineOnly $CommandLineOnly
             }
         }
         else {
@@ -100,32 +125,8 @@ function Extract-Strings {
                 }
                 
                 if ($strings.Count -gt 0) {
-                    if ($CommandLineOnly) {
-                        # Filter for command-line strings (starting with / or - and MinLength-MaxLength chars, only alphanumeric + /, -, :, =, @)
-                        $filteredStrings = $strings | Where-Object { 
-                            $_ -match $commandLineRegex -and $_.Length -ge $MinLength -and $_.Length -le $MaxLength -and $_ -match $commandLineAllowedCharsRegex
-                        }
-                        if ($filteredStrings.Count -gt 0) {
-                            # Sort strings alphabetically and remove duplicates
-                            $filteredStrings = $filteredStrings | Sort-Object -Unique
-                            $filteredStrings | Out-File -FilePath $OutputPath -Encoding UTF8
-                            Write-ColorOutput "✓ Extracted $($filteredStrings.Count) command-line strings from: $FilePath" "Green"
-                            return $true
-                        }
-                    }
-                    else {
-                        # Filter by length for regular mode
-                        $filteredStrings = $strings | Where-Object { 
-                            $_.Length -ge $MinLength -and $_.Length -le $MaxLength
-                        }
-                        if ($filteredStrings.Count -gt 0) {
-                            # Sort strings alphabetically and remove duplicates
-                            $filteredStrings = $filteredStrings | Sort-Object -Unique
-                            $filteredStrings | Out-File -FilePath $OutputPath -Encoding UTF8
-                            Write-ColorOutput "✓ Extracted $($filteredStrings.Count) strings from: $FilePath" "Green"
-                            return $true
-                        }
-                    }
+                    $filteredStrings = Filter-Strings -Strings $strings -CommandLineOnly $CommandLineOnly -MinLength $MinLength -MaxLength $MaxLength
+                    return Save-StringsToFile -Strings $filteredStrings -OutputPath $OutputPath -FilePath $FilePath -CommandLineOnly $CommandLineOnly
                 }
             }
             catch {
@@ -186,6 +187,8 @@ try {
                 Write-ColorOutput "Searching directory: $path" "Cyan"
                 
                 $exeFiles = Get-ChildItem -Path $path -Recurse -Include "*.exe", "*.dll" -ErrorAction SilentlyContinue
+
+                Write-ColorOutput "Found $($exeFiles.Count) executable files" "Cyan"
                 
                 foreach ($file in $exeFiles) {
                     $processedFiles++
