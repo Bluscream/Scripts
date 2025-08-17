@@ -192,7 +192,7 @@ $possibleSteps["update"] = @{
 $possibleSteps["meta"] = @{
     all = @{
         Description = "Update everything"
-        Actions = $possibleSteps["update"].Keys
+        Actions = $possibleSteps["update"].Keys | Sort-Object
     }
     default = @{
         Description = "Default update set"

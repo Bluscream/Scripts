@@ -799,12 +799,47 @@ function Publish-GitHubRelease {
     Write-Host "Found $($assets.Count) assets to upload:"
     foreach ($asset in $assets) {
         $sizeMB = [Math]::Round($asset.Length / 1MB, 2)
+        
+        # Try multiple methods to calculate MD5 hash
+        $hash = "N/A"
         try {
-            $hash = (Get-FileHash -Path $asset.FullName -Algorithm MD5).Hash
+            # Method 1: Use Get-FileHash with MD5 (PowerShell 5.1+)
+            $hashResult = Get-FileHash -Path $asset.FullName -Algorithm MD5 -ErrorAction Stop
+            if ($hashResult -and $hashResult.Hash) {
+                $hash = $hashResult.Hash
+                Write-Host "  MD5 calculated using Get-FileHash" -ForegroundColor DarkGray
+            }
         }
         catch {
-            $hash = "N/A"
+            Write-Host "  Get-FileHash failed, trying alternative method..." -ForegroundColor DarkGray
+            try {
+                # Method 2: Use .NET MD5 class directly
+                $md5 = [System.Security.Cryptography.MD5]::Create()
+                $fileStream = [System.IO.File]::OpenRead($asset.FullName)
+                $hashBytes = $md5.ComputeHash($fileStream)
+                $fileStream.Close()
+                $md5.Dispose()
+                $hash = [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLower()
+                Write-Host "  MD5 calculated using .NET MD5 class" -ForegroundColor DarkGray
+            }
+            catch {
+                Write-Host "  .NET MD5 calculation failed, trying PowerShell MD5..." -ForegroundColor DarkGray
+                try {
+                    # Method 3: Use PowerShell's built-in hash calculation
+                    $fileContent = Get-Content -Path $asset.FullName -Raw -Encoding Byte
+                    $md5 = New-Object -TypeName System.Security.Cryptography.MD5CryptoServiceProvider
+                    $hashBytes = $md5.ComputeHash($fileContent)
+                    $hash = [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLower()
+                    $md5.Dispose()
+                    Write-Host "  MD5 calculated using PowerShell MD5" -ForegroundColor DarkGray
+                }
+                catch {
+                    Write-Host "  All MD5 calculation methods failed for $($asset.Name)" -ForegroundColor Yellow
+                    $hash = "N/A"
+                }
+            }
         }
+        
         # Generate a color from the MD5 hash (use first 6 hex digits, map to ConsoleColor)
         $colorMap = @(
             'Black', 'DarkBlue', 'DarkGreen', 'DarkCyan', 'DarkRed', 'DarkMagenta', 'DarkYellow', 'Gray',
