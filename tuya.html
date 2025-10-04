@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tuya DP_ID Extractor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .json-input {
+            font-family: 'Courier New', monospace;
+            min-height: 300px;
+        }
+
+        .result-output {
+            font-family: 'Courier New', monospace;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.375rem;
+            padding: 1rem;
+            min-height: 100px;
+        }
+
+        .copy-btn {
+            position: relative;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <div class="card shadow">
+                    <div class="card-header bg-primary text-white">
+                        <h2 class="card-title mb-0">
+                            <i class="bi bi-code-slash"></i>
+                            Tuya DP_ID Extractor
+                        </h2>
+                        <small>Extract dp_id values from Tuya JSON and get comma-separated list</small>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-4">
+                            <label for="jsonInput" class="form-label">
+                                <strong>Paste your Tuya JSON here:</strong>
+                            </label>
+                            <textarea class="form-control json-input" id="jsonInput" placeholder="Paste your JSON data here..." rows="15"></textarea>
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end mb-4">
+                            <button class="btn btn-success me-md-2" type="button" onclick="extractDpIds()">
+                                <i class="bi bi-arrow-down"></i>
+                                Extract DP_IDs
+                            </button>
+                            <button class="btn btn-secondary" type="button" onclick="clearAll()">
+                                <i class="bi bi-trash"></i>
+                                Clear All
+                            </button>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="resultOutput" class="form-label">
+                                <strong>Comma-separated DP_ID list:</strong>
+                            </label>
+                            <div class="result-output" id="resultOutput">
+                                Click "Extract DP_IDs" to see results here...
+                            </div>
+                            <div class="mt-2 d-grid gap-2 d-md-flex justify-content-md-end">
+                                <button class="btn btn-outline-primary copy-btn" type="button" onclick="copyResult()" id="copyBtn" style="display: none;">
+                                    <i class="bi bi-clipboard"></i>
+                                    Copy to Clipboard
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="alert alert-info" role="alert">
+                            <h6 class="alert-heading">How to use:</h6>
+                            <ol class="mb-0">
+                                <li>Paste your Tuya JSON data in the textarea above</li>
+                                <li>Click "Extract DP_IDs" to process the JSON</li>
+                                <li>The comma-separated list of dp_id values will appear below</li>
+                                <li>Use the "Copy to Clipboard" button to copy the result</li>
+                            </ol>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function extractDpIds() {
+            const jsonInput = document.getElementById('jsonInput').value.trim();
+            const resultOutput = document.getElementById('resultOutput');
+            const copyBtn = document.getElementById('copyBtn');
+
+            if (!jsonInput) {
+                resultOutput.textContent = 'Please paste some JSON data first.';
+                copyBtn.style.display = 'none';
+                return;
+            }
+
+            try {
+                const data = JSON.parse(jsonInput);
+
+                // Navigate to the properties array
+                let properties = [];
+                if (data.result && data.result.properties) {
+                    properties = data.result.properties;
+                } else if (data.properties) {
+                    properties = data.properties;
+                } else {
+                    throw new Error('Could not find properties array in JSON');
+                }
+
+                // Extract dp_id values
+                const dpIds = properties.map(item => item.dp_id).filter(id => id !== undefined);
+
+                if (dpIds.length === 0) {
+                    resultOutput.textContent = 'No dp_id values found in the JSON.';
+                    copyBtn.style.display = 'none';
+                } else {
+                    const result = dpIds.join(',');
+                    resultOutput.textContent = result;
+                    copyBtn.style.display = 'inline-block';
+
+                    // Store the result for copying
+                    resultOutput.dataset.result = result;
+                }
+
+            } catch (error) {
+                resultOutput.textContent = `Error parsing JSON: ${error.message}`;
+                copyBtn.style.display = 'none';
+            }
+        }
+
+        function clearAll() {
+            document.getElementById('jsonInput').value = '';
+            document.getElementById('resultOutput').textContent = 'Click "Extract DP_IDs" to see results here...';
+            document.getElementById('copyBtn').style.display = 'none';
+        }
+
+        function copyResult() {
+            const result = document.getElementById('resultOutput').dataset.result;
+            if (result) {
+                navigator.clipboard.writeText(result).then(() => {
+                    const btn = document.getElementById('copyBtn');
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '<i class="bi bi-check"></i> Copied!';
+                    btn.classList.remove('btn-outline-primary');
+                    btn.classList.add('btn-success');
+
+                    setTimeout(() => {
+                        btn.innerHTML = originalText;
+                        btn.classList.remove('btn-success');
+                        btn.classList.add('btn-outline-primary');
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy: ', err);
+                    alert('Failed to copy to clipboard. Please select and copy manually.');
+                });
+            }
+        }
+
+        // Auto-extract when JSON is pasted (with a small delay)
+        let pasteTimeout;
+        document.getElementById('jsonInput').addEventListener('paste', function () {
+            clearTimeout(pasteTimeout);
+            pasteTimeout = setTimeout(extractDpIds, 500);
+        });
+
+        // Handle Enter key in textarea
+        document.getElementById('jsonInput').addEventListener('keydown', function (e) {
+            if (e.ctrlKey && e.key === 'Enter') {
+                extractDpIds();
+            }
+        });
+    </script>
+</body>
+
+</html>

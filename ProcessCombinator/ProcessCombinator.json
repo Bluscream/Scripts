@@ -7,6 +7,8 @@
       "SubPrograms": [
         {
           "ProgramPath": "C:\\Program Files\\VRCX\\VRCX.exe",
+          "WorkingDirectory": "C:\\Program Files\\VRCX",
+          "UseShellExecute": true,
           "KeepRunning": true
         },
         {
@@ -39,7 +41,8 @@
           "Enabled": false
         },
         {
-          "ProgramPath": "C:\\Program Files (x86)\\SlimeVR Server\\slimevr.exe",
+          "ProgramPath": "C:\\Program Files (x86)\\SlimeVR Server\\slimevr.exe_",
+          "KeepRunning": false,
           "Enabled": false
         },
         {
@@ -90,9 +93,7 @@
       "SubPrograms": [
         {
           "ProgramPath": "D:\\OneDrive\\AHK\\lghub.exe",
-          "Arguments": [
-            "D:\\OneDrive\\AHK\\Scripts\\bbr.ahk"
-          ],
+          "Arguments": ["D:\\OneDrive\\AHK\\Scripts\\bbr.ahk"],
           "Enabled": true
         },
         {
@@ -111,9 +112,7 @@
       "SubPrograms": [
         {
           "ProgramPath": "D:\\OneDrive\\AHK\\lghub.exe",
-          "Arguments": [
-            "D:\\OneDrive\\AHK\\Scripts\\ohd.ahk"
-          ]
+          "Arguments": ["D:\\OneDrive\\AHK\\Scripts\\ohd.ahk"]
         },
         {
           "ProgramPath": "C:\\Program Files (x86)\\Overwolf\\OverwolfLauncher.exe",
@@ -130,9 +129,7 @@
       "SubPrograms": [
         {
           "ProgramPath": "D:\\OneDrive\\AHK\\lghub.exe",
-          "Arguments": [
-            "D:\\OneDrive\\AHK\\Scripts\\ohd.ahk"
-          ]
+          "Arguments": ["D:\\OneDrive\\AHK\\Scripts\\ohd.ahk"]
         },
         {
           "ProgramPath": "C:\\Program Files (x86)\\Overwolf\\OverwolfLauncher.exe",

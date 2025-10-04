@@ -1,39 +1,74 @@
-$dns = (
-  "192.168.2.23","2003:e3:9f37:1300:f082:2597:c252:1864","fd00::ce45:ae48:3862:e62e"
+$dnsservers = @{
+  "hass"          = @(
+    "192.168.2.4", "fe80::360a:cf28:dbb7:3bc9",
+    "192.168.2.5", "fe80::a50f:919f:47b3:c4c1",
+    "100.100.1.4", "fd7a:115c:a1e0::5c01:d661"
+  );
+  "nas"           = @(
+    "192.168.2.10", "fe80::1e1b:dff:fe76:8bf3",
+    "192.168.2.12",
+    "100.100.1.10", "fd7a:115c:a1e0::401:1e62"
+  );
+  "homeserver"    = @(
+    "192.168.2.38", "fd00::ba98:a7bb:ac07:57fd",
+    "192.168.2.39", "fd00::505f:c63a:83df:2561"
+  );
+  "adguarddns"    = @(
+    "94.140.14.14", "2a10:50c0::ad1:ff",
+    "94.140.15.15", "2a10:50c0::ad2:ff"
+  )
+  "cloudflaredns" = @(
+    "1.1.1.1", "2606:4700:4700::1111",
+    "1.0.0.1", "2606:4700:4700::1001"
+  )
+}
 
-  #"192.168.2.3","fe80::b28b:8f78:573e:4bf6",
-  #"192.168.2.38","fd00::ba98:a7bb:ac07:57fd",
-  #"192.168.2.39","fd00::505f:c63a:83df:2561"
-  # ,"192.168.2.1","2001:4860:4860::8844","2001:4860:4860::8888",
-  # "94.140.14.14","2a10:50c0::ad1:ff",
-  # "94.140.15.15","2a10:50c0::ad2:ff"
-)
+$dns = $dnsservers["hass"] + $dnsservers["nas"] + $dnsservers["adguarddns"] + $dnsservers["cloudflaredns"]
 
-[string]$c = "DNS Servers: {0}" -f $dns
-Write-Host $c
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))  
-{  
-  $arguments = "& '" +$myinvocation.mycommand.definition + "'"
+
+Write-Host "DNS Servers:"
+foreach ($server in $dns) {
+  Write-Host " - $server"
+}
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {  
+  $arguments = "& '" + $myinvocation.mycommand.definition + "'"
   Start-Process powershell -Verb runAs -ArgumentList $arguments
   Break
 }
 
 try {
-    $profiles = Get-NetConnectionProfile -ErrorAction Stop | Select-Object InterfaceAlias, InterfaceIndex
-} catch {
-    Write-Host "Get-NetConnectionProfile is not available. Falling back to Get-NetAdapter."
-    $profiles = Get-NetAdapter | Select-Object Name, InterfaceIndex
+  $profiles = Get-NetConnectionProfile -ErrorAction Stop | Select-Object InterfaceAlias, InterfaceIndex
+}
+catch {
+  Write-Host "Get-NetConnectionProfile is not available. Falling back to Get-NetAdapter."
+  $profiles = Get-NetAdapter | Select-Object Name, InterfaceIndex
 }
 
-foreach ($k in $profiles) { # Get-NetAdapter Get-DnsClientServerAddress
-    [string]$c = "Changing DNS for {0} ({1})" -f $k.InterfaceAlias, $k.InterfaceIndex
-    Write-Host $c
+$whitelist = @() # @("2.5GB Ethernet")
+$blacklist = @() # @("Powerline", "Wi-Fi")
+
+foreach ($k in $profiles) {
+  # Get-NetAdapter Get-DnsClientServerAddress
+  [string]$devstr = "{0} ({1})" -f $k.InterfaceAlias, $k.InterfaceIndex
+  $whitelisted = (-not $whitelist -or $whitelist.Count -eq 0) -or ($whitelist -contains $k.InterfaceAlias)
+  $blacklisted = $k.InterfaceAlias -in $blacklist
+  if ($whitelisted -and -not $blacklisted) {
+    Write-Host "Changing DNS for $devstr"
     Set-DNSClientServerAddress -InterfaceIndex $k.InterfaceIndex -ServerAddresses $dns
+  }
+  else {
+    Write-Host "Resetting DNS for $devstr"
+    Set-DNSClientServerAddress -InterfaceIndex $k.InterfaceIndex -ResetServerAddresses
+  }
 }
+
+ipconfig /flushdns
+
+nslookup google.com
   
-  # $Nic1 = (Get-DnsClientServerAddress | where {}).InterfaceAlias
+# $Nic1 = (Get-DnsClientServerAddress | where {}).InterfaceAlias
   
-  # Set-DNSClientServerAddress "InterfaceAlias" –ServerAddresses ("preferred-DNS-address", "alternate-DNS-address")
+# Set-DNSClientServerAddress "InterfaceAlias" –ServerAddresses ("preferred-DNS-address", "alternate-DNS-address")
 Pause
 # SIG # Begin signature block
 # MIIbwgYJKoZIhvcNAQcCoIIbszCCG68CAQExDzANBglghkgBZQMEAgEFADB5Bgor

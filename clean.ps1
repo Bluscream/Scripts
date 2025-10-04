@@ -211,6 +211,90 @@ function Clear-WindowsEventlogs {
     }
     Write-Host "Successfully cleaned $cleaned/$($LogNames.Count) logs"
 }
+function Clear-Desktop {
+    Set-Title "Cleaning Desktop files"
+    
+    # Define target directories
+    $shortcutsDir = "D:\Desktop\_SHORTCUTS"
+    $desktopDir = "D:\Desktop\"
+    
+    # Create target directories if they don't exist
+    if (-not (Test-Path $shortcutsDir)) {
+        New-Item -ItemType Directory -Path $shortcutsDir -Force | Out-Null
+        Write-Host "Created directory: $shortcutsDir" -ForegroundColor Green
+    }
+    if (-not (Test-Path $desktopDir)) {
+        New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null
+        Write-Host "Created directory: $desktopDir" -ForegroundColor Green
+    }
+    
+    # Define desktop paths to clean
+    $desktopPaths = @(
+        [Environment]::GetFolderPath("Desktop"),  # Current user desktop
+        [Environment]::GetFolderPath("CommonDesktopDirectory")  # Global desktop
+    )
+    
+    $shortcutExtensions = @("*.url", "*.lnk", "*.symlink")
+    $movedShortcuts = 0
+    $movedFiles = 0
+    
+    foreach ($desktopPath in $desktopPaths) {
+        if (-not (Test-Path $desktopPath)) {
+            Write-Host "Desktop path not found: $desktopPath" -ForegroundColor DarkGray
+            continue
+        }
+        
+        Write-Host "Processing desktop: $desktopPath" -ForegroundColor Cyan
+        
+        # Get all files on desktop
+        $files = Get-ChildItem -Path $desktopPath -File -Force
+        
+        foreach ($file in $files) {
+            try {
+                $isShortcut = $false
+                
+                # Check if file is a shortcut type
+                foreach ($extension in $shortcutExtensions) {
+                    if ($file.Name -like $extension) {
+                        $isShortcut = $true
+                        break
+                    }
+                }
+                
+                $targetPath = if ($isShortcut) { 
+                    Join-Path -Path $shortcutsDir -ChildPath $file.Name
+                    $movedShortcuts++
+                }
+                else { 
+                    Join-Path -Path $desktopDir -ChildPath $file.Name
+                    $movedFiles++
+                }
+                
+                # Handle duplicate names
+                $counter = 1
+                $originalTargetPath = $targetPath
+                while (Test-Path $targetPath) {
+                    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                    $extension = [System.IO.Path]::GetExtension($file.Name)
+                    $targetPath = Join-Path -Path (Split-Path $originalTargetPath -Parent) -ChildPath "${nameWithoutExt}_${counter}${extension}"
+                    $counter++
+                }
+                
+                # Move the file
+                Move-Item -Path $file.FullName -Destination $targetPath -Force
+                $fileType = if ($isShortcut) { "shortcut" } else { "file" }
+                Write-Host "Moved $fileType`: $($file.Name) -> $targetPath" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "Failed to move file: $($file.FullName) - $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+    }
+    
+    Write-Host "Desktop cleaning completed:" -ForegroundColor Cyan
+    Write-Host "  - Moved $movedShortcuts shortcut files to $shortcutsDir" -ForegroundColor Green
+    Write-Host "  - Moved $movedFiles other files to $desktopDir" -ForegroundColor Green
+}
 
 # Extend or override $possibleSteps directly
 $possibleSteps["clean"] = @{
@@ -237,6 +321,10 @@ $possibleSteps["clean"] = @{
     "downloads" = @{
         Description = "Clean Downloads folders for all users except whitelisted ones"
         Code        = { Clear-Downloads }
+    }
+    "desktop"   = @{
+        Description = "Clean desktop files - move shortcuts to D:\Desktop\_SHORTCUTS and other files to D:\Desktop\"
+        Code        = { Clear-Desktop }
     }
 }
 $possibleSteps["meta"] = @{
