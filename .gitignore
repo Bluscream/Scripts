@@ -56,3 +56,8 @@ RestartOnCrash/settings.ini
 player.exe
 yt-dlp.exe
 *.tmp
+network-devices.csv
+.gitignore
+ValvePlug_1.0.0.3.exe
+network-report.html
+player_.exe
