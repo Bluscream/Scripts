@@ -1,46 +1,74 @@
 param(
   [switch]$test,
-  [string]$testDomain = "google.com"
+  [string]$testDomain = "google.com",
+  [string]$servers = "localhost"
 )
 
 
 $dnsservers = @{
-  "localhost"     = @(
+  "localhost"  = @(
     "127.0.0.1", "::1"
   )
-  "fritzbox"      = @(
+  "fritzbox"   = @(
     "192.168.2.1"
   )
-  "hass"          = @(
+  "hass"       = @(
     "192.168.2.4", "fe80::360a:cf28:dbb7:3bc9",
     "192.168.2.5", "fe80::a50f:919f:47b3:c4c1",
     "100.100.1.4", "fd7a:115c:a1e0::5c01:d661"
   );
-  "nas"           = @(
+  "nas"        = @(
     "192.168.2.10", "fe80::1e1b:dff:fe76:8bf3"
     "192.168.2.12",
     "100.100.1.10", "fd7a:115c:a1e0::401:1e62"
   );
-  "homeserver"    = @(
+  "homeserver" = @(
     "192.168.2.38", "fd00::ba98:a7bb:ac07:57fd",
     "192.168.2.39", "fd00::505f:c63a:83df:2561",
     "100.100.1.38"
   );
-  "adguarddns"    = @(
+  "adguard"    = @(
     "94.140.14.14", "2a10:50c0::ad1:ff",
     "94.140.15.15", "2a10:50c0::ad2:ff"
   )
-  "cloudflaredns" = @(
+  "cloudflare" = @(
     "1.1.1.1", "2606:4700:4700::1111",
     "1.0.0.1", "2606:4700:4700::1001"
   )
-  "tailscale"     = @("100.100.100.100")
+  "tailscale"  = @("100.100.100.100")
 }
+
 
 $whitelist = @() # @("2.5GB Ethernet")
 $blacklist = @("Tailscale") # @("Powerline", "Wi-Fi")
 
-$dns = $dnsservers["localhost"] # + $dnsservers["fritzbox"] + $dnsservers["tailscale"] + $dnsservers["hass"] + $dnsservers["homeserver"] + $dnsservers["nas"] + $dnsservers["adguarddns"] + $dnsservers["cloudflaredns"]
+# Parse -servers parameter
+$dns = @()
+if ($servers -eq "all") {
+  # Use all available DNS servers
+  foreach ($key in $dnsservers.Keys) {
+    $dns += $dnsservers[$key]
+  }
+  Write-Host "Using all DNS servers" -ForegroundColor Cyan
+}
+elseif ($servers -eq "none") {
+  # Use no DNS servers (will reset to default)
+  $dns = @()
+  Write-Host "Using no DNS servers (will reset to default)" -ForegroundColor Yellow
+}
+else {
+  # Parse comma-separated list of server names
+  $serverList = $servers -split ',' | ForEach-Object { $_.Trim() }
+  foreach ($serverName in $serverList) {
+    if ($dnsservers.ContainsKey($serverName)) {
+      $dns += $dnsservers[$serverName]
+    }
+    else {
+      Write-Host "Warning: DNS server '$serverName' not found in configuration" -ForegroundColor Yellow
+    }
+  }
+  Write-Host "Using DNS servers: $($serverList -join ', ')" -ForegroundColor Cyan
+}
 
 $useWorkingOnly = $true
 
@@ -206,4 +234,4 @@ nslookup $testDomain
 # $Nic1 = (Get-DnsClientServerAddress | where {}).InterfaceAlias
   
 # Set-DNSClientServerAddress "InterfaceAlias" –ServerAddresses ("preferred-DNS-address", "alternate-DNS-address")
-Pause
+# Pause
