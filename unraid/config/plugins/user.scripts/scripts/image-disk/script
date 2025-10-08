@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define source and destination paths as variables
-SOURCE_DEVICE="/dev/sdr"
+SOURCE_DEVICE="/dev/sds"
 SOURCE_BLOCK_DEVICE=""
 
 DESTINATION_DIR="/mnt/user/backups/Timo/Server/HomeAssistant"

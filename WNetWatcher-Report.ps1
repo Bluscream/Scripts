@@ -84,13 +84,12 @@ function New-TemporaryCFG {
     
     $cfgContent = $cfgLines -join "`n"
     
-    $cleanGuid = $InterfaceGuid -replace '[{}]', '' -replace '-', ''
     $cfgFile = Join-Path $OutputDir "WNetWatcher.cfg"
     $cfgContent | Out-File -FilePath $cfgFile -Encoding UTF8
     return $cfgFile
 }
 
-# Function to run WNetWatcher for a specific interface
+# Function to run WNetWatcher for a specific interface (synchronous version)
 function Invoke-WNetWatcher {
     param(
         [string]$InterfaceGuid,
@@ -133,6 +132,122 @@ function Invoke-WNetWatcher {
             Write-Host "Cleaned up temporary CFG file: $cfgFile" -ForegroundColor Green
         }
     }
+}
+
+# Function to run WNetWatcher asynchronously using PowerShell jobs
+function Start-WNetWatcherJob {
+    param(
+        [string]$InterfaceGuid,
+        [string]$OutputFile,
+        [string]$OutputDir,
+        [string]$InterfaceName
+    )
+    
+    $jobScript = {
+        param(
+            [string]$InterfaceGuid,
+            [string]$OutputFile,
+            [string]$OutputDir,
+            [string]$InterfaceName
+        )
+        
+        # Function to create a temporary CFG file for a specific interface (redefined for job scope)
+        function New-TemporaryCFG {
+            param(
+                [string]$InterfaceGuid,
+                [string]$OutputDir
+            )
+            
+            $cfgLines = @(
+                "[General]",
+                "ShowGridLines=0",
+                "SaveFilterIndex=0",
+                "ShowInfoTip=1",
+                "BlackBackground=0",
+                "MarkOddEvenRows=0",
+                "UseNetworkAdapter=1",
+                "NetworkAdapter=$InterfaceGuid",
+                "BackgroundScan=0",
+                "BeepOnNewDevice=0",
+                "BeepOnDeviceDisconnect=0",
+                "TrayIcon=0",
+                "TrayBalloonOnNewDevice=0",
+                "TrayBalloonOnDeviceDisconnect=0",
+                "ScanIPv6Addresses=1",
+                "UseIPAddressesRange=0",
+                "ScanOnProgramStart=0",
+                "AutoCopyDeviceNameToUserText=1",
+                "MacAddressFormat=1",
+                "StartAsHidden=1",
+                "CustomNewDeviceSound=0",
+                "CustomNewDeviceSoundFile=",
+                "CustomDisconnectedDeviceSound=0",
+                "CustomDisconnectedDeviceSoundFile=",
+                "AlertOnlyForFirstDetection=0",
+                "ClearARPCache=1",
+                "UseNewDeviceExecuteCommand=0",
+                "NewDeviceExecuteCommand=",
+                "UseDisconnectedDeviceExecuteCommand=0",
+                "DisconnectedDeviceExecuteCommand=",
+                "BackgroundScanInterval=900",
+                "ShowInactiveDevices=0",
+                "ShowPrevDevices=0",
+                "AlwaysOnTop=0",
+                "AutoShowAdvancedOptions=0",
+                "AutoSizeColumnsOnScan=1",
+                "AutoSortOnEveryScan=1"
+            )
+            
+            $cfgContent = $cfgLines -join "`n"
+            
+            $cfgFile = Join-Path $OutputDir "WNetWatcher-$InterfaceName.cfg"
+            $cfgContent | Out-File -FilePath $cfgFile -Encoding UTF8
+            return $cfgFile
+        }
+        
+        $cfgFile = $null
+        
+        try {
+            $arguments = @(
+                "/scomma", "`"$OutputFile`""
+            )
+            
+            if ($InterfaceGuid) {
+                # Create temporary CFG file for this interface
+                $cfgFile = New-TemporaryCFG -InterfaceGuid $InterfaceGuid -OutputDir $OutputDir -InterfaceName $InterfaceName
+                $arguments += "/cfg", "`"$cfgFile`""
+            }
+            
+            $process = Start-Process -FilePath "WNetWatcher.exe" -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+            
+            $result = @{
+                Success       = ($process.ExitCode -eq 0 -and (Test-Path $OutputFile))
+                ExitCode      = $process.ExitCode
+                OutputFile    = $OutputFile
+                InterfaceName = $InterfaceName
+                InterfaceGuid = $InterfaceGuid
+            }
+            
+            return $result
+        }
+        catch {
+            return @{
+                Success       = $false
+                Error         = $_.Exception.Message
+                OutputFile    = $OutputFile
+                InterfaceName = $InterfaceName
+                InterfaceGuid = $InterfaceGuid
+            }
+        }
+        finally {
+            # Clean up temporary CFG file
+            if ($cfgFile -and (Test-Path $cfgFile)) {
+                Remove-Item -Path $cfgFile -Force
+            }
+        }
+    }
+    
+    return Start-Job -ScriptBlock $jobScript -ArgumentList $InterfaceGuid, $OutputFile, $OutputDir, $InterfaceName
 }
 
 # Function to create Bootstrap HTML table
@@ -344,21 +459,83 @@ if ($interfaces.Count -eq 0) {
 else {
     Write-Host "Found $($interfaces.Count) network interface(s)" -ForegroundColor Green
     
-    # Generate CSV for each interface
-    $csvFiles = @()
+    # Start WNetWatcher jobs for all interfaces asynchronously
+    Write-Host "`nStarting WNetWatcher scans for all interfaces in parallel..." -ForegroundColor Yellow
+    $jobs = @()
+    $interfaceJobs = @{}
+    
     foreach ($interface in $interfaces) {
-        Write-Host "`nProcessing interface: $($interface.Name) ($($interface.InterfaceDescription))" -ForegroundColor Yellow
+        Write-Host "Starting scan for interface: $($interface.Name) ($($interface.InterfaceDescription))" -ForegroundColor Cyan
         
         $csvFile = Join-Path $OutputDir "network-devices-$($interface.Name).csv"
+        $job = Start-WNetWatcherJob -InterfaceGuid $interface.InterfaceGuid -OutputFile $csvFile -OutputDir $OutputDir -InterfaceName $interface.Name
         
-        if (Invoke-WNetWatcher -InterfaceGuid $interface.InterfaceGuid -OutputFile $csvFile -OutputDir $OutputDir) {
-            Write-Host "Generated CSV file: $csvFile" -ForegroundColor Green
-            $csvFiles += $csvFile
-        }
-        else {
-            Write-Warning "Failed to generate CSV for interface: $($interface.Name)"
+        $jobs += $job
+        $interfaceJobs[$job.Id] = @{
+            Interface  = $interface
+            OutputFile = $csvFile
+            Job        = $job
         }
     }
+    
+    # Wait for all jobs to complete with progress monitoring
+    Write-Host "`nWaiting for all WNetWatcher scans to complete..." -ForegroundColor Yellow
+    $completedJobs = 0
+    $totalJobs = $jobs.Count
+    
+    while ($jobs | Where-Object { $_.State -eq 'Running' }) {
+        $runningJobs = ($jobs | Where-Object { $_.State -eq 'Running' }).Count
+        $completedJobs = $totalJobs - $runningJobs
+        
+        Write-Progress -Activity "WNetWatcher Network Scanning" -Status "Scanning network interfaces" -CurrentOperation "Completed: $completedJobs/$totalJobs" -PercentComplete (($completedJobs / $totalJobs) * 100)
+        
+        Start-Sleep -Seconds 2
+    }
+    
+    Write-Progress -Activity "WNetWatcher Network Scanning" -Completed
+    
+    # Collect results from all jobs
+    Write-Host "`nCollecting results from all scans..." -ForegroundColor Yellow
+    $csvFiles = @()
+    $successCount = 0
+    $failureCount = 0
+    
+    foreach ($jobId in $interfaceJobs.Keys) {
+        $interfaceJob = $interfaceJobs[$jobId]
+        $job = $interfaceJob.Job
+        $interface = $interfaceJob.Interface
+        $outputFile = $interfaceJob.OutputFile
+        
+        try {
+            $result = Receive-Job -Job $job -Wait
+            
+            if ($result.Success) {
+                Write-Host "✓ Successfully generated CSV for interface: $($interface.Name)" -ForegroundColor Green
+                $csvFiles += $outputFile
+                $successCount++
+            }
+            else {
+                if ($result.Error) {
+                    Write-Warning "✗ Failed to generate CSV for interface $($interface.Name): $($result.Error)"
+                }
+                else {
+                    Write-Warning "✗ Failed to generate CSV for interface $($interface.Name). Exit code: $($result.ExitCode)"
+                }
+                $failureCount++
+            }
+        }
+        catch {
+            Write-Error "Error retrieving results for interface $($interface.Name): $_"
+            $failureCount++
+        }
+        finally {
+            Remove-Job -Job $job -Force
+        }
+    }
+    
+    Write-Host "`nScan Summary:" -ForegroundColor Cyan
+    Write-Host "  ✓ Successful scans: $successCount" -ForegroundColor Green
+    Write-Host "  ✗ Failed scans: $failureCount" -ForegroundColor Red
     
     if ($csvFiles.Count -eq 0) {
         Write-Error "No CSV files were generated successfully"

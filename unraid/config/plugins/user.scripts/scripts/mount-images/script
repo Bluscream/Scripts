@@ -10,10 +10,17 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+mount_partition() {
+    echo "=== Mounting $1 ($2) ==="
+    # bash "$SCRIPT_PATH" info --image "$1"
+    bash "$SCRIPT_PATH" mount --image "$1" --partition "$2" --readonly &
+    echo "   Background process started (PID: $!)"
+    echo
+}
 mount_image() {
     echo "=== Mounting $1 ==="
     # bash "$SCRIPT_PATH" info --image "$1"
-    bash "$SCRIPT_PATH" mount --image "$1" --partition "$2" --readonly &
+    bash "$SCRIPT_PATH" mount --image "$1" --readonly &
     echo "   Background process started (PID: $!)"
     echo
 }
@@ -22,10 +29,10 @@ bash "$SCRIPT_PATH" unmount
 rm -rf /mnt/images/*/
 
 # Mount specific partitions using their actual labels
-mount_image "/mnt/user/backups/Timo/PC/Drives/blu-pc.img" "Win 11 Pro"
-mount_image "/mnt/user/backups/Bettina/Laptop/drives/betty-laptop.img" "Windows"
-mount_image "/mnt/user/backups/Timo/Server/HomeAssistant/HASS_USB.img" "hassos-data"
-# mount_image "/mnt/user/backups/Timo/Server/HomeAssistant/hass-sd_broken.img" "HomeAssistant SD"
+mount_partition "/mnt/user/backups/Timo/PC/Drives/blu-pc.img" "Win 11 Pro"
+mount_partition "/mnt/user/backups/Bettina/Laptop/drives/betty-laptop.img" "Windows"
+mount_partition "/mnt/user/backups/Timo/Server/HomeAssistant/HASS_USB.img" "hassos-data"
+mount_image "/mnt/user/backups/Timo/Server/HomeAssistant/hass-sd_broken_qemu.img"
 
 echo "=== All mount operations started in background ==="
 echo "Each mount process is waiting for Enter key to unmount"

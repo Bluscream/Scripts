@@ -17,7 +17,10 @@
         "scripts": [
             "namedns-fix",
             "namefix-nginx",
-            "namefix-share-perms"
+            "namefix-share-perms",
+            "namefix-nginx-php-api",
+            "namedockerreset",
+            "namestop-everything"
         ]
     },
     {
@@ -43,7 +46,10 @@
             "namedelete-ds_store",
             "namesort-apks",
             "namesort-photos",
-            "namecreate-trees"
+            "namecreate-trees",
+            "namecreate-playlists",
+            "namemedia-embed-subtitles",
+            "namemedia-fix-names"
         ]
     }
 ]
