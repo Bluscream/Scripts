@@ -3,21 +3,18 @@
 class HostsFile {
     [string]$HostsPath
     [string]$BackupPath
-    [string]$LogPath
     
     # Constructor
     HostsFile() {
         $this.HostsPath = "$env:windir\System32\drivers\etc\hosts"
         $this.BackupPath = "$($this.HostsPath).bak"
-        $this.LogPath = "$env:TEMP\HostsFile.log"
         $this.EnsurePsHostsInstalled()
     }
     
     # Constructor with custom paths
-    HostsFile([string]$hostsPath, [string]$backupPath, [string]$logPath) {
+    HostsFile([string]$hostsPath, [string]$backupPath) {
         $this.HostsPath = $hostsPath
         $this.BackupPath = $backupPath
-        $this.LogPath = $logPath
         $this.EnsurePsHostsInstalled()
     }
     
@@ -26,29 +23,12 @@ class HostsFile {
         if (-not (Get-Command "Get-HostEntry" -ErrorAction SilentlyContinue)) {
             try {
                 Install-Module PsHosts -Force -ErrorAction Stop
-                $this.WriteLog("Installed PsHosts module")
+                Write-Host "Installed PsHosts module"
             }
             catch {
-                $this.WriteLog("Failed to install PsHosts module: $_", "ERROR")
+                Write-Error "Failed to install PsHosts module: $_"
                 throw "PsHosts module installation failed: $_"
             }
-        }
-    }
-    
-    # Logging function
-    [void]WriteLog([string]$Message) {
-        $this.WriteLog($Message, "INFO")
-    }
-    
-    [void]WriteLog([string]$Message, [string]$Level) {
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        $logEntry = "[$timestamp] [$Level] $Message"
-        Add-Content -Path $this.LogPath -Value $logEntry
-        if ($Level -eq "ERROR") {
-            Write-Error $logEntry
-        }
-        else {
-            Write-Host $logEntry
         }
     }
     
@@ -56,10 +36,10 @@ class HostsFile {
     [void]Backup() {
         if (Test-Path $this.HostsPath) {
             Copy-Item -Path $this.HostsPath -Destination $this.BackupPath -Force
-            $this.WriteLog("Created backup of hosts file at $($this.BackupPath)")
+            Write-Host "Created backup of hosts file at $($this.BackupPath)"
         }
         else {
-            $this.WriteLog("Hosts file not found at $($this.HostsPath)", "ERROR")
+            Write-Error "Hosts file not found at $($this.HostsPath)"
             throw "Hosts file not found"
         }
     }
@@ -68,10 +48,10 @@ class HostsFile {
     [void]Backup([string]$customBackupPath) {
         if (Test-Path $this.HostsPath) {
             Copy-Item -Path $this.HostsPath -Destination $customBackupPath -Force
-            $this.WriteLog("Created backup of hosts file at $customBackupPath")
+            Write-Host "Created backup of hosts file at $customBackupPath"
         }
         else {
-            $this.WriteLog("Hosts file not found at $($this.HostsPath)", "ERROR")
+            Write-Error "Hosts file not found at $($this.HostsPath)"
             throw "Hosts file not found"
         }
     }
@@ -80,10 +60,10 @@ class HostsFile {
     [void]Restore() {
         if (Test-Path $this.BackupPath) {
             Copy-Item -Path $this.BackupPath -Destination $this.HostsPath -Force
-            $this.WriteLog("Restored hosts file from backup")
+            Write-Host "Restored hosts file from backup"
         }
         else {
-            $this.WriteLog("Backup file not found at $($this.BackupPath)", "ERROR")
+            Write-Error "Backup file not found at $($this.BackupPath)"
             throw "Backup file not found"
         }
     }
@@ -92,10 +72,10 @@ class HostsFile {
     [void]Restore([string]$customBackupPath) {
         if (Test-Path $customBackupPath) {
             Copy-Item -Path $customBackupPath -Destination $this.HostsPath -Force
-            $this.WriteLog("Restored hosts file from $customBackupPath")
+            Write-Host "Restored hosts file from $customBackupPath"
         }
         else {
-            $this.WriteLog("Backup file not found at $customBackupPath", "ERROR")
+            Write-Error "Backup file not found at $customBackupPath"
             throw "Backup file not found"
         }
     }
@@ -124,7 +104,7 @@ class HostsFile {
     [void]AddEntry([string]$ipAddress, [string[]]$hostnames) {
         foreach ($hostname in $hostnames) {
             Set-HostEntry $hostname $ipAddress -Force
-            $this.WriteLog("Added entry: $ipAddress -> $hostname")
+            Write-Host "Added entry: $ipAddress -> $hostname"
         }
     }
     
@@ -132,7 +112,7 @@ class HostsFile {
     [void]AddEntry([string]$ipAddress, [string[]]$hostnames, [string]$comment) {
         foreach ($hostname in $hostnames) {
             Set-HostEntry $hostname $ipAddress -Comment $comment -Force
-            $this.WriteLog("Added entry: $ipAddress -> $hostname (Comment: $comment)")
+            Write-Host "Added entry: $ipAddress -> $hostname (Comment: $comment)"
         }
     }
     
@@ -141,10 +121,10 @@ class HostsFile {
         $entries = Get-HostEntry | Where-Object { $_.IPAddress -eq $ipAddress }
         if ($entries) {
             $entries | Remove-HostEntry
-            $this.WriteLog("Removed $(@($entries).Count) entry(ies) for IP address: $ipAddress")
+            Write-Host "Removed $(@($entries).Count) entry(ies) for IP address: $ipAddress"
         }
         else {
-            $this.WriteLog("No entry found for IP address: $ipAddress", "WARN")
+            Write-Host "No entry found for IP address: $ipAddress"
         }
     }
     
@@ -153,10 +133,10 @@ class HostsFile {
         $entries = Get-HostEntry | Where-Object { $_.HostName -eq $hostname }
         if ($entries) {
             $entries | Remove-HostEntry
-            $this.WriteLog("Removed entry for hostname: $hostname")
+            Write-Host "Removed entry for hostname: $hostname"
         }
         else {
-            $this.WriteLog("No entry found for hostname: $hostname", "WARN")
+            Write-Host "No entry found for hostname: $hostname"
         }
     }
     
@@ -171,17 +151,17 @@ class HostsFile {
                 if (@($allEntriesForIP).Count -gt 1) {
                     # Multiple hostnames for this IP, just remove this specific hostname
                     Remove-HostEntry -HostName $hostname
-                    $this.WriteLog("Removed hostname '$hostname' from IP $($entry.IPAddress) (other hostnames remain)")
+                    Write-Host "Removed hostname '$hostname' from IP $($entry.IPAddress) (other hostnames remain)"
                 }
                 else {
                     # Only hostname for this IP, remove the entire entry
                     Remove-HostEntry -HostName $hostname
-                    $this.WriteLog("Removed entry for hostname '$hostname' from IP $($entry.IPAddress) (was the only hostname)")
+                    Write-Host "Removed entry for hostname '$hostname' from IP $($entry.IPAddress) (was the only hostname)"
                 }
             }
         }
         else {
-            $this.WriteLog("No entry found for hostname: $hostname", "WARN")
+            Write-Host "No entry found for hostname: $hostname"
         }
     }
     
@@ -190,10 +170,10 @@ class HostsFile {
         $entries = Get-HostEntry | Where-Object { $_.Comment -match $comment }
         if ($entries) {
             $entries | Remove-HostEntry
-            $this.WriteLog("Removed $(@($entries).Count) entries with comment matching: $comment")
+            Write-Host "Removed $(@($entries).Count) entries with comment matching: $comment"
         }
         else {
-            $this.WriteLog("No entries found with comment matching: $comment", "WARN")
+            Write-Host "No entries found with comment matching: $comment"
         }
     }
     
@@ -202,7 +182,7 @@ class HostsFile {
         $entries = Get-HostEntry | Where-Object { -not ($_.Comment -match $comment) }
         if ($entries) {
             $entries | Remove-HostEntry
-            $this.WriteLog("Removed $(@($entries).Count) entries NOT matching comment: $comment")
+            Write-Host "Removed $(@($entries).Count) entries NOT matching comment: $comment"
         }
     }
     
@@ -211,7 +191,7 @@ class HostsFile {
         $entries = Get-HostEntry
         if ($entries) {
             $entries | Remove-HostEntry
-            $this.WriteLog("Cleared all host entries")
+            Write-Host "Cleared all host entries"
         }
     }
     
@@ -225,7 +205,7 @@ class HostsFile {
     [void]ExportToJson([string]$outputPath) {
         $json = $this.ExportToJson()
         $json | Out-File -FilePath $outputPath -Encoding UTF8
-        $this.WriteLog("Exported hosts file to JSON: $outputPath")
+        Write-Host "Exported hosts file to JSON: $outputPath"
     }
     
     # Import from JSON
@@ -237,10 +217,10 @@ class HostsFile {
                     $this.AddEntry($entry.IPAddress, @($entry.HostName), $comment)
                 }
             }
-            $this.WriteLog("Imported $(@($entries).Count) entries from JSON: $jsonPath")
+            Write-Host "Imported $(@($entries).Count) entries from JSON: $jsonPath"
         }
         else {
-            $this.WriteLog("JSON file not found: $jsonPath", "ERROR")
+            Write-Error "JSON file not found: $jsonPath"
             throw "JSON file not found"
         }
     }

@@ -5,6 +5,9 @@ param(
 
 
 $dnsservers = @{
+  "localhost"     = @(
+    "127.0.0.1", "::1"
+  )
   "fritzbox"      = @(
     "192.168.2.1"
   )
@@ -37,7 +40,7 @@ $dnsservers = @{
 $whitelist = @() # @("2.5GB Ethernet")
 $blacklist = @("Tailscale") # @("Powerline", "Wi-Fi")
 
-$dns = $dnsservers["fritzbox"] + $dnsservers["tailscale"] + $dnsservers["hass"] + $dnsservers["homeserver"] + $dnsservers["nas"] + $dnsservers["adguarddns"] + $dnsservers["cloudflaredns"]
+$dns = $dnsservers["localhost"] # + $dnsservers["fritzbox"] + $dnsservers["tailscale"] + $dnsservers["hass"] + $dnsservers["homeserver"] + $dnsservers["nas"] + $dnsservers["adguarddns"] + $dnsservers["cloudflaredns"]
 
 $useWorkingOnly = $true
 
