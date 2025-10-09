@@ -135,66 +135,255 @@ class SpeedTestResult {
     }
 }
 
-function RunSpeedTest($if) {
-    Write-Host -ForegroundColor DarkGray "[$($if.name)] Starting speed test"
+# Find speedtest executable
+function Find-Speedtest {
+    $paths = @(
+        "speedtest.exe",
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ookla.Speedtest.CLI_Microsoft.Winget.Source_8wekyb3d8bbwe\speedtest.exe",
+        "$PSScriptRoot\speedtest.exe"
+    )
+    
+    foreach ($path in $paths) {
+        if (Get-Command $path -ErrorAction SilentlyContinue) {
+            return $path
+        }
+        if (Test-Path $path -ErrorAction SilentlyContinue) {
+            return $path
+        }
+    }
+    
+    throw "speedtest.exe not found. Please install Ookla Speedtest CLI from winget or place speedtest.exe in the script directory."
+}
+
+# Run speedtest and return parsed result
+function RunSpeedTest {
+    param(
+        [hashtable]$InterfaceInfo,
+        [string]$SpeedtestPath,
+        [int]$Index,
+        [int]$Total
+    )
+    
+    $activityId = [Math]::Abs($InterfaceInfo.name.GetHashCode()) % 1000
+    
     try {
+        Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Starting..." -PercentComplete 0
+        
         $ErrorActionPreference = "Continue"
-        speedtest.exe -i $if.ipv4 -s $if.server
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[$($if.name)] Speed test completed" -ForegroundColor Green
+        
+        # Build arguments
+        $speedtestArgs = @(
+            "--format=json",
+            "--progress=yes",
+            "--accept-license",
+            "--accept-gdpr"
+        )
+        
+        if ($InterfaceInfo.ipv4) {
+            $speedtestArgs += "-i", $InterfaceInfo.ipv4
+        }
+        
+        if ($InterfaceInfo.server) {
+            $speedtestArgs += "-s", $InterfaceInfo.server
+        }
+        
+        Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Running speed test..." -PercentComplete 25
+        
+        # Run speedtest and capture output
+        $output = & $SpeedtestPath $speedtestArgs 2>&1 | Out-String
+        
+        if ($LASTEXITCODE -ne 0) {
+            Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Failed" -PercentComplete 100 -Completed
+            Write-Host "[$($InterfaceInfo.name)] Speed test failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+            return $null
+        }
+        
+        Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Parsing results..." -PercentComplete 90
+        
+        # Parse JSON output (filter to result type only)
+        $jsonLines = $output -split "`n" | Where-Object { $_.Trim() -ne "" }
+        $resultJson = $null
+        
+        foreach ($line in $jsonLines) {
+            try {
+                $obj = $line | ConvertFrom-Json
+                if ($obj.type -eq "result") {
+                    $resultJson = $obj
+                    break
+                }
+            }
+            catch {
+                # Skip non-JSON lines
+            }
+        }
+        
+        if ($resultJson) {
+            $result = [SpeedTestResult]::new($resultJson)
+            # Populate the interface name since speedtest doesn't include it
+            if ([string]::IsNullOrEmpty($result.Interface.Name)) {
+                $result.Interface.Name = $InterfaceInfo.name
+            }
+            Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Complete!" -PercentComplete 100 -Completed
+            Write-Host "[$($InterfaceInfo.name)] ✓ Complete" -ForegroundColor Green
+            return $result
         }
         else {
-            Write-Host "[$($if.name)] Speed test failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+            Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Failed to parse" -PercentComplete 100 -Completed
+            Write-Host "[$($InterfaceInfo.name)] Failed to parse JSON output" -ForegroundColor Yellow
+            return $null
         }
     }
     catch {
-        Write-Host "[$($if.name)] Error running speed test: $_" -ForegroundColor Red
+        Write-Progress -Id $activityId -Activity $InterfaceInfo.name -Status "Error" -PercentComplete 100 -Completed
+        Write-Host "[$($InterfaceInfo.name)] Error: $_" -ForegroundColor Red
+        return $null
     }
+}
+
+# Display results in a nice table
+function Show-ResultsTable {
+    param([SpeedTestResult[]]$Results)
+    
+    if (-not $Results -or @($Results).Count -eq 0) {
+        Write-Host "`nNo results to display." -ForegroundColor Yellow
+        return
+    }
+    
+    Write-Host "`n" -NoNewline
+    Write-Host ("═" * 120) -ForegroundColor Cyan
+    Write-Host "  SPEED TEST RESULTS" -ForegroundColor Cyan
+    Write-Host ("═" * 120) -ForegroundColor Cyan
+    
+    $tableData = $Results | ForEach-Object {
+        [PSCustomObject]@{
+            Interface  = $_.Interface.Name
+            IP         = $_.Interface.InternalIp
+            Download   = "$($_.GetDownloadMbps()) Mbps"
+            Upload     = "$($_.GetUploadMbps()) Mbps"
+            Ping       = "$([Math]::Round($_.Ping.Latency, 2)) ms"
+            Jitter     = "$([Math]::Round($_.Ping.Jitter, 2)) ms"
+            PacketLoss = "$([Math]::Round($_.PacketLoss, 2))%"
+            Server     = "$($_.Server.Name), $($_.Server.Location)"
+            ISP        = $_.Isp
+        }
+    }
+    
+    $tableData | Format-Table -AutoSize
+    
+    Write-Host ("═" * 120) -ForegroundColor Cyan
+    Write-Host ""
 }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not (Get-Command "Set-ConsoleFont" -ErrorAction SilentlyContinue)) {
-    try {
-        Install-Module WindowsConsoleFonts -ErrorAction Stop
-    }
-    catch {}
+# Find speedtest executable
+try {
+    $speedtestPath = Find-Speedtest
+    Write-Host "Found speedtest at: $speedtestPath" -ForegroundColor DarkGray
 }
-if (Get-Command "Set-ConsoleFont" -ErrorAction SilentlyContinue) {
-    Get-ConsoleFont | Select-Object -ExpandProperty Name | Set-ConsoleFont -Size 5
+catch {
+    Write-Host "Error: $_" -ForegroundColor Red
+    exit 1
 }
+
+# Display network interfaces
+Write-Host "`nDetected Network Interfaces:" -ForegroundColor Cyan
 $totalInterfaces = Get-NetIPConfiguration
 Format-Table -InputObject $totalInterfaces -Property @{Label = "Status"; Expression = { $_.NetAdapter.Status } }, InterfaceAlias, InterfaceDescription, @{Label = "IPv4DefaultGateway"; Expression = { $_.IPv4DefaultGateway.NextHop -join ', ' } } -AutoSize
+
+# Filter interfaces to test
 $networkInterfaces = $totalInterfaces | 
 Where-Object {
     $_.IPv4DefaultGateway -ne $null -and 
     $_.NetAdapter.Status -eq "Up"
 }
-Write-Host -ForegroundColor DarkGray "Testing $(@($networkInterfaces).Count)/$(@($totalInterfaces).Count) network interfaces"
 
+Write-Host "Testing $(@($networkInterfaces).Count)/$(@($totalInterfaces).Count) network interfaces`n" -ForegroundColor DarkGray
+
+# Build interface details list
 $interfaceDetails = @()
 foreach ($interface in $networkInterfaces) {
     $ipv4Addresses = $interface.IPv4Address.IPAddress
     foreach ($ipv4_ in $ipv4Addresses) {
         $interfaceDetails += @{
-            name   = "$($interface.InterfaceAlias) ($($interface.InterfaceDescription)): $ipv4_"
-            ipv4   = $ipv4_
-            server = $server
+            name        = "$($interface.InterfaceAlias)"
+            description = $interface.InterfaceDescription
+            ipv4        = $ipv4_
+            server      = $Server
         }
     }
 }
-$funcDef = ${function:RunSpeedTest}.ToString()
 
+# Run speed tests
+$results = @()
 $useParallel = ($Parallel -and $($PSVersionTable.PSVersion.Major -ge 7))
+
 if ($useParallel) {
-    $interfaceDetails | ForEach-Object -Parallel {
-        ${function:RunSpeedTest} = $using:funcDef
-        RunSpeedTest $_
-    } -ThrottleLimit $ThrottleLimit
+    Write-Host "Running tests in parallel (ThrottleLimit: $ThrottleLimit)...`n" -ForegroundColor Cyan
+    
+    # Prepare initialization script with all class and function definitions
+    $initScript = [scriptblock]::Create(@"
+# Class definitions
+$((Get-Content $PSCommandPath -Raw -ErrorAction Stop).Split('Set-StrictMode')[0])
+
+# Function definitions
+function Find-Speedtest {
+    $(${function:Find-Speedtest}.ToString())
 }
-else {
+
+function RunSpeedTest {
+    $(${function:RunSpeedTest}.ToString())
+}
+"@)
+    
+    # Use ThreadJobs for parallel execution
+    $jobs = @()
+    $index = 0
     foreach ($if in $interfaceDetails) {
-        RunSpeedTest $if
+        # Throttle: wait if we've hit the limit
+        while (@(Get-Job -State Running).Count -ge $ThrottleLimit) {
+            Start-Sleep -Milliseconds 100
+        }
+        
+        $index++
+        $job = Start-ThreadJob -Name "SpeedTest-$($if.name)" -InitializationScript $initScript -ScriptBlock {
+            param($InterfaceInfo, $SpeedtestPath, $Index, $Total)
+            RunSpeedTest -InterfaceInfo $InterfaceInfo -SpeedtestPath $SpeedtestPath -Index $Index -Total $Total
+        } -ArgumentList $if, $speedtestPath, $index, $interfaceDetails.Count
+        
+        $jobs += $job
+        
+        # Delay to avoid rate limiting from speedtest servers
+        Start-Sleep -Seconds 2
+    }
+    
+    # Wait for all jobs to complete and collect results
+    Write-Host "Waiting for all tests to complete...`n" -ForegroundColor DarkGray
+    $jobs | Wait-Job | Out-Null
+    
+    foreach ($job in $jobs) {
+        $result = Receive-Job -Job $job
+        if ($result) {
+            $results += $result
+        }
+        Remove-Job -Job $job
     }
 }
+else {
+    Write-Host "Running tests sequentially...`n" -ForegroundColor Cyan
+    
+    $total = $interfaceDetails.Count
+    $index = 0
+    foreach ($if in $interfaceDetails) {
+        $index++
+        $result = RunSpeedTest -InterfaceInfo $if -SpeedtestPath $speedtestPath -Index $index -Total $total
+        if ($result) {
+            $results += $result
+        }
+    }
+}
+
+# Filter out null results and display
+$results = $results | Where-Object { $_ -ne $null }
+Show-ResultsTable -Results $results

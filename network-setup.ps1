@@ -97,12 +97,13 @@ $adapter.Enabled = $false
 $adapters += $adapter
 
 $adapter = [NetworkAdapterSettings]::new('Tailscale Tunnel')
-# $adapter.Ipv4 = '100.100.1.50'
-# $adapter.Ipv6 = 'fd7a:115c:a1e0::af01:1582'
-# $adapter.Ipv6PrefixLength = 128
-# $adapter.Gateway = '100.100.1.1'
+$adapter.Ipv4 = '100.100.1.50'
+$adapter.Ipv6 = 'fd7a:115c:a1e0::af01:1582'
+$adapter.Ipv6PrefixLength = 128
+$adapter.Gateway = '100.100.1.1'
+$adapter.SubnetMask = '255.192.0.0'
 # $adapter.DNSServers = @('100.100.100.100', 'fd7a:115c:a1e0::53')
-$adapters += $adapter
+# $adapters += $adapter
 
 # Show current network adapter status
 Show-NetworkAdapterStatus -Title "Current Network Configuration"
