@@ -4,13 +4,71 @@ param (
     [string[]]$Actions = @(),
     [switch]$SkipUAC = $false,
     [string[]]$WhitelistedUsers = @("Bluscream"),
-    [string]$Message = "Message"
+    [string]$Message = "Message",
+    [switch]$Wait = $false
 )
 
 # Import Bluscream helper functions (must come first)
 . "$PSScriptRoot/powershell/bluscream.ps1"
 # Import the shared steps logic (depends on bluscream.ps1)
 . "$PSScriptRoot/powershell/steps.ps1"
+
+# --- Space Tracking ---
+$Global:TotalSpaceSaved = 0
+
+function Get-PathSize {
+    param ([string]$Path)
+    if (-not (Test-Path $Path)) { return 0 }
+    if (Test-Path $Path -PathType Leaf) {
+        return (Get-Item $Path).Length
+    }
+    return (Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+}
+
+function Format-Size {
+    param ([long]$Bytes)
+    if ($Bytes -le 0) { return "0 Bytes" }
+    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+    return "$Bytes Bytes"
+}
+
+# Override Clear-Directory to track space
+function Clear-Directory {
+    param (
+        [string]$Path,
+        [switch]$RemoveDir
+    )
+    if (Test-Path $Path) {
+        $size = Get-PathSize -Path $Path
+        $Global:TotalSpaceSaved += $size
+        $pathStr = $Path | Quote
+        if ($size -gt 0) {
+            Write-Host "Tracking $(Format-Size $size) to be saved from $pathStr" -ForegroundColor Gray
+        }
+        
+        # Original logic from bluscream.ps1 (re-implemented here to track)
+        if ($RemoveDir) {
+            $removeStr = 'Remov'
+            $removePath = $Path
+        } else {
+            $removeStr = 'Clean'
+            $removePath = "$Path\*"
+        }
+        Set-Title "$($removeStr)ing directory $pathStr"
+        try {
+            Remove-Item -Path $removePath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "$($removeStr)ed directory $pathStr"
+        } catch {
+            if ($_.Exception.Message -like "*because it is being used by another process*") {
+                Write-Host $($_.Exception.Message) -ForegroundColor Yellow
+            } else {
+                Write-Host "Error $($removeStr)ing directory $pathStr - $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+    }
+}
 
 # --- Cleaning function definitions ---
 function Invoke-PipCommand {
@@ -39,8 +97,7 @@ function Invoke-PipCommand {
             if ($LASTEXITCODE -eq 0 -and $output) {
                 return $output
             }
-        }
-        catch {
+        } catch {
             Write-Verbose "Failed to run pip command: $_"
         }
     }
@@ -71,20 +128,17 @@ function Clear-Pip {
     if ($unimportantPackages.Count -gt 0) {
         try {
             Invoke-PipCommand -Arguments ("uninstall -y " + ($unimportantPackages -join ' '))
-        }
-        catch {
+        } catch {
             Write-Warning "Bulk uninstall failed: $_. Attempting to uninstall packages individually."
             foreach ($package in $unimportantPackages) {
                 try {
                     Invoke-PipCommand -Arguments "uninstall -y $package"
-                }
-                catch {
+                } catch {
                     Write-Warning "Failed to uninstall package $($package): $_"
                 }
             }
         }
-    }
-    else {
+    } else {
         Write-Host "Only important packages remain"
     }
 }
@@ -128,8 +182,7 @@ function Remove-MappedDrives {
             Remove-PSDrive -Name $letter -Force -ErrorAction Stop
             net use "$($letter):" /delete /y | Out-Null
             Write-Host "Removed mapped drive $letter."
-        }
-        catch {
+        } catch {
             Write-Warning "Failed to remove mapped drive $letter. $_"
         }
     }
@@ -145,15 +198,15 @@ function Clear-Downloads {
                 $items = Get-ChildItem -Path $downloadsDir -Force
                 foreach ($item in $items) {
                     try {
+                        $size = Get-PathSize -Path $item.FullName
                         if ($item.PSIsContainer) {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
-                        }
-                        else {
+                        } else {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
                         }
-                        Write-Host "Moved to Recycle Bin: $($item.FullName)"
-                    }
-                    catch {
+                        $Global:TotalSpaceSaved += $size
+                        Write-Host "Moved to Recycle Bin: $($item.FullName) ($(Format-Size $size))"
+                    } catch {
                         Write-Host "Failed to move to Recycle Bin: $($item.FullName) - $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                 }
@@ -161,14 +214,51 @@ function Clear-Downloads {
         }
     }
 }
+function Clear-Drives {
+    Write-Host "Running Disk Cleanup for all fixed drives..."
+    Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+        $driveLetter = $_.DeviceID
+        Write-Host "Cleaning drive $driveLetter..."
+        $processArgs = @{
+            FilePath     = "CleanMgr.exe"
+            ArgumentList = "/d $driveLetter /VERYLOWDISK"
+            Wait         = $Wait
+        }
+        if ($Wait) {
+            $processArgs.WindowStyle = "Normal"
+        } else {
+            $processArgs.WindowStyle = "Minimized"
+        }
+        Start-Process @processArgs
+    }
+}
+
+function Clear-DrivesAlt {
+    Set-Title "Cleaning Drives (Legacy Method)"
+    Write-Host "Setting registry flags for Disk Cleanup..."
+    Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\*' | ForEach-Object {
+        try {
+            New-ItemProperty -Path $_.PSPath -Name "StateFlags0001" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+        } catch {}
+    }
+    Write-Host "Running Disk Cleanup sagerun:1..."
+    $processArgs = @{
+        FilePath     = "CleanMgr.exe"
+        ArgumentList = "/sagerun:1"
+        Wait         = $Wait
+    }
+    if ($Wait) {
+        $processArgs.WindowStyle = "Normal"
+    } else {
+        $processArgs.WindowStyle = "Minimized"
+    }
+    Start-Process @processArgs
+}
 function Clear-Windows {
     Set-Title "Cleaning Windows"
     Write-Host "Stopping Windows Update Service"
     net stop wuauserv
-    Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\*' | % {
-        New-ItemProperty -Path $_.PSPath -Name StateFlags0001 -Value 2 -PropertyType DWord -Force
-    }
-    Start-Process -FilePath CleanMgr.exe -ArgumentList '/sagerun:1' -WindowStyle Minimized
+
     $users = Get-ChildItem -Path $env:SystemDrive\Users -Directory
     foreach ($user in $users) {
         $tempDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Temp'
@@ -179,20 +269,103 @@ function Clear-Windows {
         Clear-Directory -Path $inetCacheDir
         $webCacheDir = Join-Path -Path $user.FullName -ChildPath 'AppData\Local\Microsoft\Windows\WebCache'
         Clear-Directory -Path $webCacheDir
+    }
+    Clear-Directory -Path "$env:windir\Temp"
+    Clear-Directory -Path "$env:windir\Prefetch"
+    if (Test-Path "$env:windir\memory.dmp") {
+        $Global:TotalSpaceSaved += Get-PathSize -Path "$env:windir\memory.dmp"
+        Remove-Item -Path "$env:windir\memory.dmp" -Force
+    }
+    Clear-Directory -Path "$env:windir\SoftwareDistribution"
+    Clear-Directory -Path "G:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\"
+    Write-Host "Starting Windows Update Service"
+    net start wuauserv
+}
+
+function Clear-Dism {
+    Set-Title "DISM Cleanup"
+    Write-Host "Running DISM Component Store Cleanup (this may take several minutes)..."
+    try {
+        $processArgs = @{
+            FilePath     = "Dism.exe"
+            ArgumentList = "/online /Cleanup-Image /StartComponentCleanup /ResetBase"
+            Wait         = $Wait
+        }
+        if ($Wait) {
+            $processArgs.NoNewWindow = $true
+        } else {
+            $processArgs.WindowStyle = "Minimized"
+        }
+        Start-Process @processArgs
+    } catch {
+        Write-Warning "DISM cleanup failed: $_"
+    }
+}
+
+function Clear-ShellBags {
+    Set-Title "Shell Bags Cleanup"
+    Write-Host "Flushing Explorer Shell Bags (Folder View Settings)..."
+    $bags = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\Bags"
+    $bagMRU = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\BagMRU"
+    if (Test-Path $bags) { Remove-Item -Path $bags -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $bagMRU) { Remove-Item -Path $bagMRU -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Clear-AppLeftovers {
+    Set-Title "App Leftovers Cleanup"
+    Write-Host "Cleaning application leftovers..."
+    $appLeftovers = @(
+        "$env:LocalAppData\Microsoft\OneDrive",
+        "$env:ProgramData\Microsoft OneDrive",
+        "C:\Windows\Installer\Razer"
+    )
+    foreach ($path in $appLeftovers) {
+        if (Test-Path $path) {
+            Write-Host "Cleaning $path"
+            Clear-Directory -Path $path
+        }
+    }
+}
+
+function Clear-Bits {
+    Set-Title "BITS Cleanup"
+    Write-Host "Clearing BITS Transfer Queue..."
+    Stop-Service -Name BITS -Force -ErrorAction SilentlyContinue
+    $bitsPath = "$env:ALLUSERSPROFILE\Microsoft\Network\Downloader"
+    if (Test-Path $bitsPath) {
+        Get-ChildItem -Path $bitsPath -Filter "qmgr*.dat" | ForEach-Object {
+            $Global:TotalSpaceSaved += $_.Length
+            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Service -Name BITS -ErrorAction SilentlyContinue
+}
+function Clear-Gpu {
+    Set-Title "Cleaning GPU caches"
+    $users = Get-ChildItem -Path $env:SystemDrive\Users -Directory
+    foreach ($user in $users) {
         $nvidiaCacheFolders = @("DXCache", "GLCache", "OptixCache")
         foreach ($cacheFolder in $nvidiaCacheFolders) {
             $nvidiaPath = Join-Path -Path $user.FullName -ChildPath "AppData\Local\NVIDIA\$cacheFolder"
             Clear-Directory -Path $nvidiaPath
         }
     }
-    Clear-Directory -Path "$env:windir\Temp"
-    Clear-Directory -Path "$env:windir\Prefetch"
-    if (Test-Path "$env:windir\memory.dmp") {
-        Remove-Item -Path "$env:windir\memory.dmp" -Force
-    }
-    Clear-Directory -Path "$env:windir\SoftwareDistribution"
-    Write-Host "Starting Windows Update Service"
-    net start wuauserv
+    Clear-Directory -Path "D:\_TEMP\AMD\DX9Cache"
+    Clear-Directory -Path "D:\_TEMP\AMD\DxCache"
+    Clear-Directory -Path "D:\_TEMP\AMD\DxcCache"
+    Clear-Directory -Path "D:\_TEMP\AMD\OglCache"
+    Clear-Directory -Path "D:\_TEMP\AMD\VkCache"
+    Clear-Directory -Path "D:\_TEMP\AMD\amdcc"
+}
+function Clear-Games {
+    Set-Title "Cleaning Game caches"
+    Clear-Directory -Path "D:\_TEMP\VRChat\Cache-WindowsPlayer"
+    Clear-Directory -Path "D:\_TEMP\VRChat\HTTPCache-WindowsPlayer"
+    Clear-Directory -Path "D:\_TEMP\VRChat\TextureCache-WindowsPlayer"
+    Clear-Directory -Path "D:\OneDrive\Games\VRChat\_TOOLS\VRCVideoCacher\CachedAssets"
+    Clear-Directory -Path "D:\Users\Bluscream\AppData\LocalLow\VRChat\vrchat\HTTPCache-WindowsPlayer"
+    Clear-Directory -Path "D:\Users\Bluscream\AppData\LocalLow\VRChat\vrchat\VRCHTTPCache"
+    Clear-Directory -Path "S:\Steam\steamapps\common\ChilloutVR\ChilloutVR_Data\Cache\"
 }
 function Clear-WindowsEventlogs {
     Set-Title "Cleaning Windows event logs"
@@ -203,8 +376,7 @@ function Clear-WindowsEventlogs {
         try {
             Start-Process -FilePath "wevtutil.exe" -ArgumentList "cl `"$LogName`"" -NoNewWindow # -WindowStyle Hidden  -Wait
             $cleaned++
-        }
-        catch {
+        } catch {
             $errStr = "Failed to clear $LogName. Error: $_"
             Write-Host -NoNewline $errStr
         }
@@ -264,8 +436,7 @@ function Clear-Desktop {
                 $targetPath = if ($isShortcut) { 
                     Join-Path -Path $shortcutsDir -ChildPath $file.Name
                     $movedShortcuts++
-                }
-                else { 
+                } else { 
                     Join-Path -Path $desktopDir -ChildPath $file.Name
                     $movedFiles++
                 }
@@ -284,8 +455,7 @@ function Clear-Desktop {
                 Move-Item -Path $file.FullName -Destination $targetPath -Force
                 $fileType = if ($isShortcut) { "shortcut" } else { "file" }
                 Write-Host "Moved $fileType`: $($file.Name) -> $targetPath" -ForegroundColor Green
-            }
-            catch {
+            } catch {
                 Write-Host "Failed to move file: $($file.FullName) - $($_.Exception.Message)" -ForegroundColor Red
             }
         }
@@ -302,17 +472,17 @@ $possibleSteps["clean"] = @{
         Description = "Clean pip cache and packages"
         Code        = { Backup-Pip; Clear-Pip }
     }
+    "drivesalt" = @{
+        Description = "Clean drives using legacy registry flags method"
+        Code        = { Clear-DrivesAlt }
+    }
     "npm"       = @{
         Description = "Clean npm cache and node_modules"
         Code        = { Backup-Npm; Clear-Npm }
     }
     "windows"   = @{
-        Description = "Clean Windows temp files, caches, and system folders"
-        Code        = { Clear-Windows }
-    }
-    "eventlogs" = @{
-        Description = "Clear Windows event logs"
-        Code        = { Clear-WindowsEventlogs }
+        Description = "Clean Windows temp files, caches, component store, shell bags, BITS, and event logs"
+        Code        = { Clear-Drives; Clear-Dism; Clear-Windows; Clear-ShellBags; Clear-Bits; Clear-WindowsEventlogs }
     }
     "netdrives" = @{
         Description = "Remove mapped network drives"
@@ -326,6 +496,18 @@ $possibleSteps["clean"] = @{
         Description = "Clean desktop files - move shortcuts to D:\Desktop\_SHORTCUTS and other files to D:\Desktop\"
         Code        = { Clear-Desktop }
     }
+    "gpu"       = @{
+        Description = "Clean GPU caches (NVIDIA/AMD)"
+        Code        = { Clear-Gpu }
+    }
+    "games"     = @{
+        Description = "Clean game caches (VRChat/ChilloutVR)"
+        Code        = { Clear-Games }
+    }
+    "leftovers" = @{
+        Description = "Clean OneDrive/Razer residue"
+        Code        = { Clear-AppLeftovers }
+    }
 }
 $possibleSteps["meta"] = @{
     "all"     = @{
@@ -334,7 +516,7 @@ $possibleSteps["meta"] = @{
     }
     "default" = @{
         Description = "Default actions"
-        Actions     = @("elevate", "pip", "npm", "windows", "eventlogs", "pause")
+        Actions     = @("elevate", "pip", "npm", "windows", "gpu", "games", "pause")
     }
 }
 
@@ -348,6 +530,11 @@ Write-Host "The following actions will be run:" -ForegroundColor Cyan
 
 # Run the steps
 Run-Steps -Steps $possibleSteps -ActionsToRun $actionsToRun
+
+Write-Host "`nCleanup Summary" -ForegroundColor Cyan
+Write-Host "----------------" -ForegroundColor Cyan
+Write-Host "Total space saved (detected): $(Format-Size $Global:TotalSpaceSaved)" -ForegroundColor Green
+Write-Host "Note: Background tasks (Disk Cleanup, DISM) may still be reclaiming additional space." -ForegroundColor Gray
 
 if ($PauseBeforeExit) {
     Pause "Press any key to exit"
